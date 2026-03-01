@@ -14,6 +14,31 @@ function setDisabled(id, disabled) {
 
 
 // -------------------------
+// Toasts (Extract top-right, Run bottom-right)
+// -------------------------
+function ensureToastHost(pos){
+  const id = pos === "top-right" ? "toastTopRight" : "toastBottomRight";
+  let host = document.getElementById(id);
+  if (host) return host;
+  host = document.createElement("div");
+  host.id = id;
+  host.className = `toastHost ${pos}`;
+  document.body.appendChild(host);
+  return host;
+}
+function toast(msg, pos){
+  const host = ensureToastHost(pos);
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.textContent = msg;
+  host.appendChild(t);
+  setTimeout(()=>{ t.classList.add("show"); }, 10);
+  setTimeout(()=>{ t.classList.remove("show"); t.classList.add("hide"); }, 3500);
+  setTimeout(()=>{ try{ t.remove(); }catch(e){} }, 4200);
+}
+
+
+// -------------------------
 // Premium bulk state (must be declared before first use)
 // -------------------------
 let bulkFiles = [];
@@ -29,29 +54,6 @@ function updateBulkCount() {
   }
 }
 
-function applySavedTheme(){
-  try{
-    const saved = localStorage.getItem("dbs_theme") || "trust";
-    document.documentElement.dataset.theme = saved;
-  }catch(e){}
-}
-
-function initThemeToggle(){
-  try{
-    const btnTrust = $("themeTrust");
-    const btnModern = $("themeModern");
-    const apply = (t)=>{
-      document.documentElement.dataset.theme = t;
-      localStorage.setItem("dbs_theme", t);
-      if (btnTrust) btnTrust.classList.toggle("chipActive", t==="trust");
-      if (btnModern) btnModern.classList.toggle("chipActive", t==="modern");
-    };
-    if (btnTrust) btnTrust.addEventListener("click", ()=>apply("trust"));
-    if (btnModern) btnModern.addEventListener("click", ()=>apply("modern"));
-    applySavedTheme();
-    apply(document.documentElement.dataset.theme || "trust");
-  }catch(e){}
-}
 
 
 function downloadBlob(blob, filename){
@@ -96,9 +98,8 @@ function statusLabel(status) {
   if (status === "queued") return "Queued";
   if (status === "running") return "Running…";
   if (status === "clear") return "Clear";
-  if (status === "not_on_update_service") return "Not on Update Service";
-  if (status === "needs_review") return "Needs Review";
-  if (status === "portal_unavailable") return "Portal unavailable";
+    if (status === "needs_review") return "Needs Review";
+  if (status === "portal_unavailable") return "Portal Unavailable";
   return status;
 }
 
@@ -120,21 +121,12 @@ function confClass(pct){
   return "confLow";
 }
 
-function confHint(pct){
+function confHint(pct, edited){
   const p = Math.max(0, Math.min(100, Math.round(Number(pct||0))));
-  return `<span class="confDot ${confClass(p)}" aria-hidden="true"></span>${p}%`;
+  const tag = edited ? ' <span class="editedTag">Edited</span>' : '';
+  return `<span class="confDot ${confClass(p)}" aria-hidden="true"></span>${p}%${tag}`;
 }
 
-function ensureModeUI() {
-  const mode = $("modeBulk").checked ? "bulk" : "single";
-  $("singleWrap").classList.toggle("hidden", mode !== "single");
-  $("bulkWrap").classList.toggle("hidden", mode !== "bulk");
-}
-
-function bindModeHandlers(){
-  $("modeSingle")?.addEventListener("change", ensureModeUI);
-  $("modeBulk")?.addEventListener("change", ensureModeUI);
-}
 
 // -------------------------
 // Bulk file handling (append + drag/drop, max 100)
@@ -327,12 +319,15 @@ function renderBulkTable(items) {
     row.dataset.issueYear = it.issue_year || "";
 
     const conf = it.confidence || {};
+    row._conf = conf;
     const overall = conf.overall ?? "";
 
     row.innerHTML = `
       <div class="bulkRowTop">
         <div class="bulkRowLeft">
-          <button type="button" class="iconBtn btnRemoveRow" data-idx="${idx}" aria-label="Remove row" title="Remove">×</button>
+          <button type="button" class="iconBtn btnRemoveRow" data-idx="${idx}" aria-label="Remove row" title="Remove"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+  <path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v9h-2V9zm4 0h2v9h-2V9zM7 9h2v9H7V9z"/>
+</svg></button>
           <div class="bulkIndex">#${idx + 1}</div>
         </div>
 
@@ -345,13 +340,13 @@ function renderBulkTable(items) {
           <div class="fieldBlock">
             <div class="fieldLabel">Certificate No</div>
             <input class="cell cert" value="${it.certificate_number || ""}">
-            <div class="fieldHint">${confHint(conf.certificate_number || 0)}</div>
+            <div class="fieldHint">${confHint(conf.certificate_number || 0, false)}</div>
           </div>
 
           <div class="fieldBlock">
             <div class="fieldLabel">Surname</div>
             <input class="cell surname" value="${it.surname || ""}">
-            <div class="fieldHint">${confHint(conf.surname || 0)}</div>
+            <div class="fieldHint">${confHint(conf.surname || 0, false)}</div>
           </div>
 
           <div class="fieldBlock">
@@ -361,7 +356,7 @@ function renderBulkTable(items) {
               <input class="cell mm" value="${it.dob_month || ""}" placeholder="MM">
               <input class="cell yy" value="${it.dob_year || ""}" placeholder="YYYY">
             </div>
-            <div class="fieldHint">${confHint(conf.dob || 0)}</div>
+            <div class="fieldHint">${confHint(conf.dob || 0, false)}</div>
           </div>
         </div>
 
@@ -370,16 +365,30 @@ function renderBulkTable(items) {
           <div class="dlWrap"><span class="dlCell muted">Not run yet</span></div>
         </div>
       </div>
-
-      <div class="bulkMeta">
-        <div class="confLine">Overall confidence: <span class="confDot ${confClass(overall||0)}" aria-hidden="true"></span>${Math.round(overall || 0)}%</div>
-      </div>
     `;
     list.appendChild(row);
   });
 
   updateBulkCount();
 }
+
+// Mark edited fields (do not change confidence)
+document.addEventListener("input", (e) => {
+  const inp = e.target;
+  if (!(inp instanceof HTMLInputElement)) return;
+  const row = inp.closest?.(".bulkRow");
+  if (!row) return;
+  if (!inp.classList.contains("cell")) return;
+  inp.dataset.edited = "1";
+  const block = inp.closest?.(".fieldBlock");
+  const hint = block?.querySelector?.(".fieldHint");
+  if (hint){
+    const conf = (row._conf || {});
+    if (inp.classList.contains("cert")) hint.innerHTML = confHint(conf.certificate_number||0, true);
+    if (inp.classList.contains("surname")) hint.innerHTML = confHint(conf.surname||0, true);
+    if (inp.classList.contains("dd") || inp.classList.contains("mm") || inp.classList.contains("yy")) hint.innerHTML = confHint(conf.dob||0, true);
+  }
+});
 
 // Remove row in extracted list (cards)
 document.addEventListener("click", (e) => {
@@ -418,6 +427,7 @@ $("btnExtractBulk")?.addEventListener("click", async () => {
     renderBulkTable(lastExtractedItems);
     updateBulkCount();
     setText("extractBulkStatus", data.notice ? data.notice : "Done.");
+    toast("Extraction complete", "top-right");
     setText("zipNotice", "");
   } catch (err) {
     setText("extractBulkStatus", err?.message || "Bulk extraction failed.");
@@ -446,16 +456,40 @@ async function exportExtract(fmt){
 }
 
 async function exportResults(fmt){
-  // We store last job payload in window._lastJobPayload from poll updates
-  const payload = window._lastJobPayload;
-  if(!payload?.rows?.length){
-    setText("runBulkStatus","Nothing to export. Please Run first.");
+  const rows = Array.from(document.querySelectorAll("#bulkList .bulkRow"));
+  if(!rows.length){
+    setText("runBulkStatus","Nothing to export. Please Extract first.");
     return;
   }
+  // Build rows from current UI (includes statuses after run)
+  const out = rows.map((row) => {
+    const cert = row.querySelector("input.cert")?.value || "";
+    const surname = row.querySelector("input.surname")?.value || "";
+    const dd = row.querySelector("input.dd")?.value || "";
+    const mm = row.querySelector("input.mm")?.value || "";
+    const yy = row.querySelector("input.yy")?.value || "";
+    const statusText = row.querySelector(".badge")?.className?.includes("clear") ? "clear"
+                    : row.querySelector(".badge")?.className?.includes("needs_review") ? "needs_review"
+                    : row.querySelector(".badge")?.className?.includes("portal_unavailable") ? "portal_unavailable"
+                    : "";
+    const pdfUrl = row.querySelector(".downloadBtn")?.getAttribute("href") || "";
+    const pdfFilename = pdfUrl ? decodeURIComponent(pdfUrl.split("/").pop() || "") : "";
+    return {
+      forename: row.dataset.forename || "",
+      surname,
+      certificate_number: cert,
+      dob_day: dd,
+      dob_month: mm,
+      dob_year: yy,
+      status: statusLabel(statusText) ? statusText : (row.dataset.status||statusText||""),
+      pdf_filename: pdfFilename
+    };
+  });
+  const checked_date = window._lastCheckedDate || "";
   const resp = await fetch("/dbs/export/results", {
     method:"POST",
     headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({format: fmt, checked_date: payload.checked_date || "", rows: payload.rows || []})
+    body: JSON.stringify({format: fmt, checked_date, rows: out})
   });
   if(!resp.ok){
     const data = await resp.json().catch(()=>({}));
@@ -464,6 +498,7 @@ async function exportResults(fmt){
   const blob = await resp.blob();
   downloadBlob(blob, fmt==="csv" ? "results.csv" : "results.xlsx");
 }
+
 
 $("btnDlExtractXlsx")?.addEventListener("click", async ()=>{
   try{ await exportExtract("xlsx"); } catch(e){ setText("extractBulkStatus", e?.message || "Export failed."); }
@@ -522,14 +557,22 @@ function updateBulkUIFromStatus(data) {
   setText("runBulkStatus", total ? `Running ${done}/${total}` : "");
 
   const rows = data.rows || [];
+  if (data.checked_date) window._lastCheckedDate = data.checked_date;
   rows.forEach((r, idx) => {
     const tr = document.querySelector(`#bulkList .bulkRow[data-row="${idx + 1}"]`);
     if (!tr) return;
+    tr.dataset.status = r.status || "";
     const statusCell = tr.querySelector(".statusCell");
     const dlCell = tr.querySelector(".dlCell");
 
-    statusCell.innerHTML = "";
+        statusCell.innerHTML = "";
     statusCell.appendChild(buildBadge(r.status));
+    if (r.status === "running") {
+      const bar = document.createElement("div");
+      bar.className = "miniProgress";
+      bar.textContent = "██████░░░░";
+      statusCell.appendChild(bar);
+    }
 
     if (r.status === "running" || r.status === "queued") {
       dlCell.innerHTML = "";
@@ -537,14 +580,14 @@ function updateBulkUIFromStatus(data) {
     }
 
     if (r.status === "portal_unavailable") {
-      dlCell.innerHTML = `<span class="muted">DBS portal unavailable (maintenance). Try later.</span>`;
+      dlCell.innerHTML = `<span class="muted">Portal Unavailable</span>`;
       return;
     }
 
     if (r.pdf_url) {
       dlCell.innerHTML = `<a class="btnSmall downloadBtn" href="${r.pdf_url}">⬇ Download PDF</a>`;
     } else {
-      dlCell.innerHTML = `<span class="muted">No output</span>`;
+      dlCell.innerHTML = ``;
     }
   });
 
@@ -553,17 +596,28 @@ function updateBulkUIFromStatus(data) {
   if (zipBtn) {
     if (data.zip_ready && data.zip_url) {
       zipBtn.href = data.zip_url;
-      zipBtn.classList.remove("hidden");
+      zipBtn.classList.remove("disabledLink");
       zipBtn.textContent = "Download All PDFs (ZIP)";
     } else {
-      zipBtn.classList.add("hidden");
+      zipBtn.removeAttribute("href");
+      zipBtn.classList.add("disabledLink");
     }
   }
+
+  // Enable results downloads when at least one row is finished
+  const anyDone = rows.some(rr => rr.status && rr.status !== "queued" && rr.status !== "running");
+  setDisabled("btnDlResultsXlsx", !anyDone);
+  setDisabled("btnDlResultsCsv", !anyDone);
 
   if (data.state === "done") {
     stopPolling();
     setDisabled("btnRunBulk", false);
+    const runBtn = $("btnRunBulk");
+    if (runBtn) runBtn.classList.remove("isRunning");
+    if (runBtn) runBtn.textContent = "Run All Checks";
     setText("runBulkStatus", `Completed ${done}/${total}`);
+    toast(`Run complete (${done}/${total})`, "bottom-right");
+    window._lastRunCompleted = true;
   }
 }
 
@@ -571,6 +625,9 @@ $("btnRunBulk")?.addEventListener("click", async () => {
   stopPolling();
   setText("runBulkStatus", "");
   setDisabled("btnRunBulk", true);
+  const runBtn = $("btnRunBulk");
+  if (runBtn){ runBtn.classList.add("isRunning"); runBtn.textContent = "Running…"; }
+  window._lastRunCompleted = false;
 
   const step1 = getStep1();
   const items = collectBulkItems();
@@ -607,9 +664,7 @@ $("btnRunBulk")?.addEventListener("click", async () => {
 
 
 document.addEventListener("DOMContentLoaded", () => {
-  applySavedTheme();
-  initThemeToggle();
-  bindModeHandlers();
-  ensureModeUI();
+  setDisabled("btnDlResultsXlsx", true);
+  setDisabled("btnDlResultsCsv", true);
   updateBulkCount();
 });

@@ -4,26 +4,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DBS Check</title>
-  <script>
-    (function(){
-      try{
-        var t = localStorage.getItem('dbs_theme') || 'trust';
-        document.documentElement.dataset.theme = t;
-      }catch(e){}
-    })();
-  </script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <div class="container">
     <div class="topBar">
   <h1>DBS Check</h1>
-  <div class="themeToggle" id="themeToggle">
-    <span class="muted">Theme</span>
-    <button type="button" id="themeTrust" class="chip chipActive">Trust</button>
-    <button type="button" id="themeModern" class="chip">Modern</button>
   </div>
-</div>
     <p class="muted">Upload DBS PDF/image → Extract → (edit if needed) → Run DBS Check → PDF downloads.</p>
 
     <section class="card">
@@ -47,68 +34,14 @@
     <section class="card">
       <h2>Step 2 — Upload DBS document</h2>
 
-      <div class="modeRow segmented">
-        <span class="muted">Mode:</span>
-        <label class="radio segment">
-          <input type="radio" name="mode" id="modeSingle" value="single" checked />
-          Single check
-        </label>
-        <label class="radio segment">
-          <input type="radio" name="mode" id="modeBulk" value="bulk" />
-          Multiple check (up to 100)
-        </label>
-      </div>
-
-      <!-- Single -->
-      <div id="singleWrap">
-        <input id="file" type="file" accept="application/pdf,image/*" />
-        <div class="row">
-          <button id="btnExtract">Extract</button>
-          <span id="extractStatus" class="muted"></span>
-        </div>
-
-        <div class="divider"></div>
-
-        <h3>Extracted (editable)</h3>
-        <div class="grid">
-          <label>
-            Certificate Number
-            <input id="certificate_number" type="text" />
-            <small id="conf_cert" class="muted"></small>
-          </label>
-          <label>
-            Surname (from DBS)
-            <input id="surname_extracted" type="text" />
-            <small id="conf_surname" class="muted"></small>
-          </label>
-          <label>
-            DOB (DD / MM / YYYY)
-            <div class="grid3">
-              <input id="dob_day" type="text" placeholder="DD" />
-              <input id="dob_month" type="text" placeholder="MM" />
-              <input id="dob_year" type="text" placeholder="YYYY" />
-            </div>
-            <small id="conf_dob" class="muted"></small>
-            <small id="conf_overall" class="muted"></small>
-          </label>
-</div>
-
-        <div class="row actionBar actionBarBottom">
-          <button id="btnRun" class="primary">Run DBS Check</button>
-          <span id="runStatus" class="muted"></span>
-        </div>
-        <div class="row">
-          <a id="singleDownload" class="btnLink hidden" href="#" download>Download PDF</a>
-        </div>
-
-        <p class="hint">
-          Output filename: <b>{Surname} - DBS Check - {CheckedDate}.pdf</b>
-        </p>
-      </div>
-
       <!-- Bulk -->
-      <div id="bulkWrap" class="hidden">
-        <div id="dropZone" class="dropZone">Drag & drop up to 100 files (PDF/JPG/PNG/WEBP/CSV/XLSX/DOCX)</div>
+      <div id="bulkWrap">
+        <div id="dropZone" class="dropZone">
+          <div class="dzIcon" aria-hidden="true">⬆</div>
+          <div class="dzTitle">Upload DBS Documents</div>
+          <div class="dzSub">Drop files here <span class="muted">or</span> click to upload</div>
+          <div class="dzMeta">PDF / JPG / PNG / CSV / XLSX — Max 100 files</div>
+        </div>
         <div class="muted small">Supported formats: PDF (text/scanned), JPG/JPEG, PNG, WEBP, CSV, XLSX, DOCX (best effort). Limits: 100 files, 100 rows per run.</div>
         <div id="bulkChips" class="chips"></div>
         <input id="files" type="file" accept="application/pdf,image/*,.webp,.csv,.xlsx,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple class="hiddenFile" />
@@ -148,7 +81,7 @@
 
         <div class="row actionBar actionBarBottom">
           <button id="btnRunBulk" class="primary">Run All Checks</button>
-          <a id="btnDlZip" class="btnLink zipBtn hidden" href="#" download>Download All PDFs (ZIP)</a>
+          <a id="btnDlZip" class="btnLink zipBtn disabledLink" href="#" download>Download All PDFs (ZIP)</a>
           <button id="btnDlResultsXlsx" type="button" class="ghost">Download Results Excel (Optional)</button>
           <button id="btnDlResultsCsv" type="button" class="ghost">Download Results CSV (Optional)</button>
           <span id="runBulkStatus" class="muted"></span>

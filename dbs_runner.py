@@ -9,7 +9,6 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError,
 CRSC_CHECK = "https://secure.crbonline.gov.uk/crsc/check"
 
 STATUS_CLEAR = "clear"
-STATUS_NOT_ON_UPDATE = "not_on_update_service"
 STATUS_NEEDS_REVIEW = "needs_review"
 STATUS_PORTAL_UNAVAILABLE = "portal_unavailable"
 
@@ -161,72 +160,52 @@ def _has_any(page, selectors) -> bool:
     return False
 
 
-def _classify_result_page(page) -> str:
-    # Structure-first classification:
-    # - Look for success / mismatch panels by container classes/ids (not keywords-only).
-    success_panels = [
-        "div.alert-success",
-        "div.panel-success",
-        "div.success",
-        "#success",
-        ".successPanel",
-        ".matchPanel",
-        ".result-success",
-    ]
-    mismatch_panels = [
-        "div.alert-danger",
-        "div.panel-danger",
-        "div.error",
-        "#mismatch",
-        ".mismatchPanel",
-        ".noMatchPanel",
-        ".result-danger",
-        ".result-error",
-    ]
 
-    has_success = _has_any(page, success_panels)
-    has_mismatch = _has_any(page, mismatch_panels)
+def _classify_result_page(page) -> Dict[str, Any]:
+    """Classify the portal page into a status and whether a PDF output should be saved."""
+    try:
+        body_txt = (page.inner_text("body") or "")
+    except Exception:
+        body_txt = ""
+    t = body_txt.lower()
 
-    if has_success and not has_mismatch:
-        return STATUS_CLEAR
-    if has_mismatch and not has_success:
-        return STATUS_NOT_ON_UPDATE
-    # If we have a recognizable "result" area but can't classify confidently, mark Needs Review
-    resultish = _has_any(page, ["#content", "main", "div.container", "form"])
-    if resultish:
-        return STATUS_NEEDS_REVIEW
+    # Validation / form errors (Needs Review but NO PDF)
+    validation_needles = [
+        "please fix the following errors",
+        "certificate number is invalid",
+        "details entered do not match our records",
+        "the details entered do not match",
+        "surname does not match",
+        "date of birth does not match",
+    ]
+    if any(n in t for n in validation_needles) and ("continue" in t or "back" in t or "errors" in t):
+        return {"status": STATUS_NEEDS_REVIEW, "pdf_allowed": False, "reason": "validation"}
+
+    # Clear (explicit wording)
+    clear_needles = [
+        "did not reveal any information",
+        "remains current",
+    ]
+    if all(n in t for n in clear_needles):
+        return {"status": STATUS_CLEAR, "pdf_allowed": True, "reason": "clear"}
+
+    # Needs review results (mismatch / no longer current / could not confirm)
+    needs_review_needles = [
+        "do not match",
+        "no longer current",
+        "unable to confirm",
+        "cannot confirm",
+        "not match",
+    ]
+    if any(n in t for n in needs_review_needles):
+        return {"status": STATUS_NEEDS_REVIEW, "pdf_allowed": True, "reason": "result"}
+
+    # Fallback: if we reached a results-like page, treat as Needs Review with PDF
+    return {"status": STATUS_NEEDS_REVIEW, "pdf_allowed": True, "reason": "unknown"}
+
     return STATUS_NEEDS_REVIEW
 
 
-def _inject_needs_review_notice(page) -> None:
-    # Ensure the PDF contains a clear notice for support/admin.
-    try:
-        page.evaluate(
-            """
-() => {
-  const existing = document.getElementById('dbs-v2-needs-review');
-  if (existing) return;
-  const bar = document.createElement('div');
-  bar.id = 'dbs-v2-needs-review';
-  bar.textContent = 'Layout changed – inform administrator/developer.';
-  bar.style.position = 'fixed';
-  bar.style.top = '0';
-  bar.style.left = '0';
-  bar.style.right = '0';
-  bar.style.zIndex = '999999';
-  bar.style.padding = '12px 16px';
-  bar.style.fontSize = '14px';
-  bar.style.fontFamily = 'Arial, sans-serif';
-  bar.style.borderBottom = '2px solid #000';
-  bar.style.background = '#fff3cd';
-  bar.style.color = '#000';
-  document.body.style.paddingTop = '56px';
-  document.body.prepend(bar);
-}
-"""
-        )
-    except Exception:
-        pass
 
 def run_dbs_check_and_download_pdf(
     *,
@@ -328,15 +307,18 @@ def run_dbs_check_and_download_pdf(
             page.wait_for_load_state("domcontentloaded", timeout=30000)
             page.wait_for_timeout(900)
 
-            status = _classify_result_page(page)
-
-            if status == STATUS_NEEDS_REVIEW:
-                _inject_needs_review_notice(page)
+            classified = _classify_result_page(page)
+            status = classified.get("status") or STATUS_NEEDS_REVIEW
+            pdf_allowed = bool(classified.get("pdf_allowed", True))
+            reason = classified.get("reason") or ""
 
             if status == STATUS_PORTAL_UNAVAILABLE:
                 return {"ok": True, "status": STATUS_PORTAL_UNAVAILABLE, "pdf_path": "", "trace_path": str(trace_path)}
 
-            # Save PDF output for Clear / Not on Update / Needs Review
+            # Save PDF output for Clear / Needs Review (skip validation form pages)
+            if not pdf_allowed:
+                return {"ok": True, "status": status, "pdf_path": "", "trace_path": str(trace_path), "no_pdf": True, "reason": reason}
+
             page.wait_for_timeout(500)
             page.pdf(path=str(pdf_path), print_background=True)
 

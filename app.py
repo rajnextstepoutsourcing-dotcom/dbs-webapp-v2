@@ -349,19 +349,20 @@ VISION_PROMPT = """You are extracting ONLY these fields from a UK DBS Enhanced C
 4) Date of Birth (label 'Date of Birth')
 5) Date of Issue (label 'Date of Issue' or 'Issue Date') — DO NOT use Print Date / Date Printed.
 
-Return STRICT JSON with this schema:
+Return STRICT JSON with this schema (confidence must be 0.0 to 1.0):
 {
-  "certificate_number": "string digits or empty",
-  "surname": "string or empty",
-  "forename": "string or empty",
-  "dob": "DD MONTH YYYY or empty",
-  "issue_date": "DD MONTH YYYY or empty"
+  "certificate_number": {"value": "string digits or empty", "confidence": 0.0},
+  "surname": {"value": "string or empty", "confidence": 0.0},
+  "forename": {"value": "string or empty", "confidence": 0.0},
+  "dob": {"day": "DD or empty", "month": "MM or empty", "year": "YYYY or empty", "confidence": 0.0},
+  "issue_date": {"day": "DD or empty", "month": "MM or empty", "year": "YYYY or empty", "confidence": 0.0}
 }
 
 Rules:
-- If a field is not visible, return empty string for that field.
+- If a field is not visible, return empty value(s) and confidence 0.0.
 - Certificate number MUST be digits only (no spaces).
-- Do not guess.
+- Do not guess. If uncertain, lower confidence.
+- Never return 1.0 unless the field is perfectly clear in the document.
 """
 
 
@@ -419,9 +420,17 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
     def _is_missing(d: Dict[str, Any]) -> bool:
         if not d:
             return True
-        cert_ok = bool(validate_cert_number(str(d.get("certificate_number", "") or "")))
-        surname_ok = bool(normalize_ws(str(d.get("surname", "") or "")).strip())
-        dob_ok = bool(normalize_ws(str(d.get("dob", "") or "")).strip())        # fallback if any of these are missing
+        def _val(x):
+            if isinstance(x, dict):
+                return str(x.get("value") or "")
+            return str(x or "")
+        cert_ok = bool(validate_cert_number(_val(d.get("certificate_number", ""))))
+        surname_ok = bool(normalize_ws(_val(d.get("surname", ""))).strip())
+        dob_v = d.get("dob")
+        if isinstance(dob_v, dict):
+            dob_ok = bool(str(dob_v.get("day") or "").strip() and str(dob_v.get("month") or "").strip() and str(dob_v.get("year") or "").strip())
+        else:
+            dob_ok = bool(normalize_ws(str(dob_v or "")).strip())
         return not (cert_ok and surname_ok and dob_ok)
 
     if _is_missing(data):
@@ -432,34 +441,80 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
 
     model_used = str(data.get("_model") or (GEMINI_MODEL_STRONG if _is_missing(data) else GEMINI_MODEL_FAST))
 
+    def _get_val(name: str) -> str:
+        v = data.get(name)
+        if isinstance(v, dict):
+            return str(v.get("value") or "")
+        return str(v or "")
+
+    def _get_conf(name: str) -> float:
+        v = data.get(name)
+        if isinstance(v, dict):
+            try:
+                return float(v.get("confidence") or 0.0)
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def _pct(f: float) -> int:
+        try:
+            f = float(f or 0.0)
+        except Exception:
+            f = 0.0
+        f = max(0.0, min(1.0, f))
+        return int(round(f * 100))
+
     out: Dict[str, Any] = {
-        "certificate_number": validate_cert_number(str(data.get("certificate_number", "") or "")),
-        "surname": normalize_ws(str(data.get("surname", "") or "")).upper() or None,
-        "forename": normalize_ws(str(data.get("forename", "") or "")).upper() or None,
+        "certificate_number": validate_cert_number(_get_val("certificate_number")),
+        "surname": normalize_ws(_get_val("surname")).upper() or None,
+        "forename": normalize_ws(_get_val("forename")).upper() or None,
         "dob": None,
         "issue_date": None,
+        "confidence": {
+            "certificate_number": _pct(_get_conf("certificate_number")),
+            "surname": _pct(_get_conf("surname")),
+            "dob": _pct(_get_conf("dob")),
+            "issue_date": _pct(_get_conf("issue_date")),
+        },
         "_model": model_used,
     }
 
-    dob_parts = (
-        parse_uk_date_words(str(data.get("dob", "") or ""))
-        or parse_ddmmyyyy(str(data.get("dob", "") or ""))
-        or parse_uk_date_words(str(data.get("date_of_birth", "") or ""))
-        or parse_ddmmyyyy(str(data.get("date_of_birth", "") or ""))
-    )
-    if dob_parts:
-        out["dob"] = {"dd": dob_parts[0], "mm": dob_parts[1], "yyyy": dob_parts[2]}
+    # DOB may arrive as structured dict
+    dob_obj = data.get("dob") if isinstance(data.get("dob"), dict) else None
+    if dob_obj:
+        dd = str(dob_obj.get("day") or "").zfill(2) if str(dob_obj.get("day") or "").strip() else ""
+        mm = str(dob_obj.get("month") or "").zfill(2) if str(dob_obj.get("month") or "").strip() else ""
+        yy = str(dob_obj.get("year") or "").strip()
+        if dd and mm and yy:
+            out["dob"] = {"dd": dd, "mm": mm, "yyyy": yy}
+    else:
+        dob_parts = (
+            parse_uk_date_words(_get_val("dob"))
+            or parse_ddmmyyyy(_get_val("dob"))
+            or parse_uk_date_words(str(data.get("date_of_birth", "") or ""))
+            or parse_ddmmyyyy(str(data.get("date_of_birth", "") or ""))
+        )
+        if dob_parts:
+            out["dob"] = {"dd": dob_parts[0], "mm": dob_parts[1], "yyyy": dob_parts[2]}
 
-    issue_parts = (
-        parse_uk_date_words(str(data.get("issue_date", "") or ""))
-        or parse_ddmmyyyy(str(data.get("issue_date", "") or ""))
-        or parse_uk_date_words(str(data.get("date_of_issue", "") or ""))
-        or parse_ddmmyyyy(str(data.get("date_of_issue", "") or ""))
-        or parse_uk_date_words(str(data.get("issued_on", "") or ""))
-        or parse_ddmmyyyy(str(data.get("issued_on", "") or ""))
-    )
-    if issue_parts:
-        out["issue_date"] = {"dd": issue_parts[0], "mm": issue_parts[1], "yyyy": issue_parts[2]}
+    issue_obj = data.get("issue_date") if isinstance(data.get("issue_date"), dict) else None
+    if issue_obj:
+        dd = str(issue_obj.get("day") or "").zfill(2) if str(issue_obj.get("day") or "").strip() else ""
+        mm = str(issue_obj.get("month") or "").zfill(2) if str(issue_obj.get("month") or "").strip() else ""
+        yy = str(issue_obj.get("year") or "").strip()
+        if dd and mm and yy:
+            out["issue_date"] = {"dd": dd, "mm": mm, "yyyy": yy}
+    else:
+        issue_parts = (
+            parse_uk_date_words(_get_val("issue_date"))
+            or parse_ddmmyyyy(_get_val("issue_date"))
+            or parse_uk_date_words(str(data.get("date_of_issue", "") or ""))
+            or parse_ddmmyyyy(str(data.get("date_of_issue", "") or ""))
+            or parse_uk_date_words(str(data.get("issued_on", "") or ""))
+            or parse_ddmmyyyy(str(data.get("issued_on", "") or ""))
+        )
+        if issue_parts:
+            out["issue_date"] = {"dd": issue_parts[0], "mm": issue_parts[1], "yyyy": issue_parts[2]}
 
     return out
 
@@ -829,12 +884,11 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 "issue_month": issue_mm,
                 "issue_year": issue_yy,
                 "confidence": {
-                    "certificate_number": cert_conf,
-                    "surname": surname_conf,
-                    "dob": dob_conf,
-                    "overall": overall,
-                    "issue_date": score_dob(issue_dd, issue_mm, issue_yy, source=source.get("issue_date") or "") if (issue_dd or issue_mm or issue_yy) else 0,
-                },
+                        "certificate_number": cert_conf,
+                        "surname": surname_conf,
+                        "dob": dob_conf,
+                        "issue_date": issue_conf,
+                    },
                 "source": source,
             })
             if len(items) >= total_rows_cap:
@@ -964,10 +1018,12 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
         issue_mm = (issue.get("mm") or "")
         issue_yy = (issue.get("yyyy") or "")
 
-        cert_conf = score_cert_number(cert_val)
-        surname_conf = score_surname(surname_val, source=source.get("surname") or "")
-        dob_conf = score_dob(dob_dd, dob_mm, dob_yy, source=source.get("dob") or "")
-        overall = overall_confidence(cert_conf, surname_conf, dob_conf)
+        # Prefer Gemini confidence when available (Image scan)
+        vconf = (vision.get("confidence") if isinstance(locals().get("vision", {}), dict) else {}) or {}
+        cert_conf = int(vconf.get("certificate_number") or score_cert_number(cert_val) or 0)
+        surname_conf = int(vconf.get("surname") or score_surname(surname_val, source=source.get("surname") or "") or 0)
+        dob_conf = int(vconf.get("dob") or score_dob(dob_dd, dob_mm, dob_yy, source=source.get("dob") or "") or 0)
+        issue_conf = int(vconf.get("issue_date") or score_dob(issue_dd, issue_mm, issue_yy, source=source.get("issue_date") or "") or 0)
 
         items.append({
             "original_filename": fname,
@@ -1011,14 +1067,6 @@ def _dmy(dd: str, mm: str, yy: str) -> str:
         return f"{dd.zfill(2)}/{mm.zfill(2)}/{yy}"
     return ""
 
-def _map_update_service(status: str) -> str:
-    s = (status or "").strip().lower()
-    if s == "clear":
-        return "YES"
-    if s == "not on update service":
-        return "NO"
-    if s in ("needs review", "portal unavailable", "running", "error", "pending"):
-        return "UNKNOWN"
     return "UNKNOWN"
 
 def _export_rows_extract(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1048,8 +1096,7 @@ def _export_rows_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
             "DOB": _dmy(r.get("dob_day"), r.get("dob_month"), r.get("dob_year")),
             "Issue Date": _dmy(r.get("issue_day"), r.get("issue_month"), r.get("issue_year")),
             "Status": status,
-            "Update Service": _map_update_service(status),
-            "Checked Date": checked_date,
+                        "Checked Date": checked_date,
             "PDF Filename": (r.get("pdf_filename") or "").strip(),
             "Notes": (r.get("error") or r.get("notes") or "").strip(),
         })
@@ -1080,12 +1127,11 @@ async def export_extract(request: Request):
     fmt = (data.get("format") or "xlsx").lower()
     items = data.get("items") or []
     rows = _export_rows_extract(items)
+    columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","PDF Filename","Notes"]
     if fmt == "csv":
-        columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","PDF Filename","Notes"]
         b = _csv_bytes(rows, columns)
         return Response(content=b, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=extract.csv"})
     else:
-        columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","PDF Filename","Notes"]
         b = _xlsx_bytes(rows, columns)
         return Response(content=b, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         headers={"Content-Disposition": "attachment; filename=extract.xlsx"})
@@ -1095,7 +1141,7 @@ async def export_results(request: Request):
     data = await request.json()
     fmt = (data.get("format") or "xlsx").lower()
     rows = _export_rows_results(data)
-    columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","Status","Update Service","Checked Date","PDF Filename","Notes"]
+    columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","Status","Checked Date","PDF Filename","Notes"]
     if fmt == "csv":
         b = _csv_bytes(rows, columns)
         return Response(content=b, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=results.csv"})
@@ -1106,6 +1152,7 @@ async def export_results(request: Request):
 
 
 # -------------------------
+
 # Run DBS (single returns PDF; bulk returns job + links/zip)
 # -------------------------
 from dbs_runner import run_dbs_check_and_download_pdf
@@ -1151,7 +1198,7 @@ async def dbs_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job expired or not found.")
     _touch_job(job_id)
     rows = meta.get("rows") or []
-    done = sum(1 for r in rows if (r.get("status") in ["clear", "not_on_update_service", "needs_review", "portal_unavailable"]))
+    done = sum(1 for r in rows if (r.get("status") in ["clear", "needs_review", "portal_unavailable"]))
     total = len(rows) if rows else (1 if meta.get("mode") == "single" else 0)
     payload = {
         "job_id": job_id,
@@ -1240,7 +1287,7 @@ async def _process_bulk_job(
         )
 
         status = (result.get("status") or "needs_review").strip()
-        if status not in ["clear", "not_on_update_service", "needs_review", "portal_unavailable"]:
+        if status not in ["clear", "needs_review", "portal_unavailable"]:
             status = "needs_review"
 
         row["status"] = status
@@ -1250,18 +1297,20 @@ async def _process_bulk_job(
             continue
 
         out_surname = _safe_filename(applicant_surname.upper(), f"SURNAME{i}")
-
-        if status == "clear":
-            final_name = f"{out_surname} - DBS Check - {checked_date}.pdf"
-        elif status == "not_on_update_service":
-            final_name = f"{out_surname} - Not on Update Service - {checked_date}.pdf"
-        else:
-            final_name = f"{out_surname} - Needs Review - {checked_date}.pdf"
+        cert_part = _safe_filename(cert, f"CERT{i}")
+        status_label = "Clear" if status == "clear" else ("Needs Review" if status == "needs_review" else "Portal Unavailable")
+        final_name = f"{out_surname} - {cert_part} - {status_label} - {checked_date}.pdf"
 
         final_name = _safe_filename(final_name, f"DBS-Result-{i}.pdf")
 
         pdf_path = result.get("pdf_path") or ""
         if not pdf_path or not os.path.exists(pdf_path):
+            # Some Needs Review cases are validation-form pages where we intentionally do not generate a PDF.
+            if status == "needs_review" and result.get("no_pdf"):
+                row["pdf_filename"] = ""
+                row["pdf_url"] = ""
+                row["notes"] = "Needs Review (no PDF available for validation page)."
+                continue
             row["status"] = "needs_review"
             row["error"] = result.get("error") or "Runner did not produce a PDF."
             continue
@@ -1427,7 +1476,7 @@ async def dbs_run(request: Request):
     )
 
     status = (result.get("status") or "needs_review").strip()
-    if status not in ["clear", "not_on_update_service", "needs_review", "portal_unavailable"]:
+    if status not in ["clear", "needs_review", "portal_unavailable"]:
         status = "needs_review"
 
     if status == "portal_unavailable":
@@ -1444,12 +1493,9 @@ async def dbs_run(request: Request):
 
     out_surname = _safe_filename(applicant_surname.upper(), "SURNAME")
 
-    if status == "clear":
-        final_name = f"{out_surname} - DBS Check - {checked_date}.pdf"
-    elif status == "not_on_update_service":
-        final_name = f"{out_surname} - Not on Update Service - {checked_date}.pdf"
-    else:
-        final_name = f"{out_surname} - Needs Review - {checked_date}.pdf"
+    cert_part = _safe_filename(certificate_number, "CERT")
+    status_label = "Clear" if status == "clear" else ("Needs Review" if status == "needs_review" else "Portal Unavailable")
+    final_name = f"{out_surname} - {cert_part} - {status_label} - {checked_date}.pdf"
 
     final_name = _safe_filename(final_name, "DBS-Result.pdf")
 
