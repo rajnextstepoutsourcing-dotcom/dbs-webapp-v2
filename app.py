@@ -1227,6 +1227,7 @@ async def _process_bulk_job(
     employee_forename: str,
     employee_surname: str,
     items: List[Dict[str, Any]],
+    previous_job_id: str = "",
 ):
     meta = JOBS.get(job_id)
     if not meta:
@@ -1256,6 +1257,51 @@ async def _process_bulk_job(
         dob_month = str(it.get("dob_month") or "").strip()
         dob_year = str(it.get("dob_year") or "").strip()
 
+        
+        # Option 1 (locked): if row is NOT dirty and we have previous job outputs, reuse/copy the previous PDF
+        dirty = bool(it.get("dirty"))
+        existing_status = (it.get("existing_status") or "").strip() or row.get("existing_status","").strip()
+        existing_pdf = (it.get("existing_pdf_filename") or "").strip() or row.get("existing_pdf_filename","").strip()
+
+        if (not dirty) and previous_job_id and existing_pdf:
+            prev_meta = JOBS.get(previous_job_id)
+            prev_dir = Path(prev_meta.get("path")) if prev_meta and prev_meta.get("path") else None
+            prev_path = (prev_dir / existing_pdf) if prev_dir else None
+            # Normalize status to supported set
+            st0 = (existing_status or row.get("status") or "").strip()
+            if st0 not in ["clear", "needs_review", "portal_unavailable"]:
+                st0 = "needs_review"
+            row["status"] = st0
+            if st0 == "portal_unavailable":
+                # No output allowed
+                row["pdf_filename"] = ""
+                row["pdf_url"] = ""
+                row["error"] = "DBS portal unavailable (maintenance). Try later."
+                continue
+
+            if prev_path and prev_path.exists():
+                out_surname = _safe_filename(applicant_surname.upper(), f"SURNAME{i}")
+                cert_tmp = validate_cert_number(certificate_number)
+                cert_part = _safe_filename(cert_tmp or certificate_number, f"CERT{i}")
+                status_label = "Clear" if st0 == "clear" else ("Needs Review" if st0 == "needs_review" else "Portal Unavailable")
+                final_name = _safe_filename(f"{out_surname} - {cert_part} - {status_label} - {checked_date}.pdf", f"DBS-Result-{i}.pdf")
+
+                final_path = job_dir / final_name
+                try:
+                    if final_path.exists():
+                        final_path.unlink()
+                    import shutil
+                    shutil.copyfile(str(prev_path), str(final_path))
+                except Exception:
+                    # fallback: keep name from previous
+                    final_path = prev_path
+                    final_name = existing_pdf
+
+                pdf_names.append(final_name)
+                row["pdf_filename"] = final_name
+                row["filename"] = final_name
+                row["pdf_url"] = f"/dbs/download/{job_id}/{final_name}"
+                continue
         cert = validate_cert_number(certificate_number)
 
         if not cert:
@@ -1391,6 +1437,8 @@ async def dbs_run(request: Request):
     organisation_name = (payload.get("organisation_name") or payload.get("org_name") or payload.get("organisation") or "").strip()
     employee_forename = (payload.get("employee_forename") or payload.get("forename") or "").strip()
     employee_surname  = (payload.get("employee_surname")  or payload.get("surname_user") or payload.get("surname") or "").strip()
+    previous_job_id = (payload.get("previous_job_id") or "").strip()
+
 
     if not (organisation_name and employee_forename and employee_surname):
         raise HTTPException(status_code=400, detail="Organisation/Forename/Surname (Step 1) is incomplete.")
@@ -1416,6 +1464,9 @@ async def dbs_run(request: Request):
                 "issue_month": (it.get("issue_month") or ""),
                 "issue_year": (it.get("issue_year") or ""),
                 "original_filename": (it.get("original_filename") or ""),
+                "dirty": bool(it.get("dirty")),
+                "existing_status": (it.get("existing_status") or ""),
+                "existing_pdf_filename": (it.get("existing_pdf_filename") or ""),
                 "pdf_filename": "",
                 "pdf_url": "",
                 "error": "",
@@ -1432,6 +1483,7 @@ async def dbs_run(request: Request):
                 employee_forename=employee_forename,
                 employee_surname=employee_surname,
                 items=items,
+                previous_job_id=previous_job_id,
             )
         )
 

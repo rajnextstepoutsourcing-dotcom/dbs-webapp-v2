@@ -100,6 +100,7 @@ function statusLabel(status) {
   if (status === "clear") return "Clear";
     if (status === "needs_review") return "Needs Review";
   if (status === "portal_unavailable") return "Portal Unavailable";
+  if (status === "edited") return "Edited — Run again";
   return status;
 }
 
@@ -154,7 +155,8 @@ function renderChips(){
     btn.type="button";
     btn.title="Remove";
     btn.textContent="×";
-    btn.addEventListener("click", ()=>{ bulkFiles.splice(idx,1); renderChips(); updateBulkCount(); });
+    btn.addEventListener("click", ()=>{ bulkFiles.splice(idx,1); renderChips(); updateBulkCount();
+  updateRunButtonLabel(); });
     chip.appendChild(btn);
     wrap.appendChild(chip);
   });
@@ -362,7 +364,7 @@ function renderBulkTable(items) {
 
         <div class="bulkActions">
           <div class="statusWrap"><span class="statusCell"></span></div>
-          <div class="dlWrap"><span class="dlCell muted">Not run yet</span></div>
+          <div class="dlWrap"><span class="dlCell"></span></div>
         </div>
       </div>
     `;
@@ -370,6 +372,7 @@ function renderBulkTable(items) {
   });
 
   updateBulkCount();
+  updateRunButtonLabel();
 }
 
 // Mark edited fields (do not change confidence)
@@ -380,6 +383,22 @@ document.addEventListener("input", (e) => {
   if (!row) return;
   if (!inp.classList.contains("cell")) return;
   inp.dataset.edited = "1";
+  // Option 1: locked "edited -> rerun" architecture
+  row.dataset.dirty = "1";
+  // Immediately mark status + clear any old PDF output for this row (but keep old ZIP/Results available until user clicks Run again)
+  const statusCell = row.querySelector(".statusCell");
+  const dlCell = row.querySelector(".dlCell");
+  if (statusCell){
+    statusCell.innerHTML = "";
+    statusCell.appendChild(buildBadge("edited"));
+  }
+  if (dlCell){
+    dlCell.innerHTML = "";
+  }
+  row.dataset.pdfFilename = "";
+  row.dataset.pdfUrl = "";
+  updateRunButtonLabel();
+
   const block = inp.closest?.(".fieldBlock");
   const hint = block?.querySelector?.(".fieldHint");
   if (hint){
@@ -395,7 +414,17 @@ document.addEventListener("click", (e) => {
   const btn = e.target.closest?.(".btnRemoveRow");
   if (!btn) return;
   const row = btn.closest(".bulkRow");
-  if (row) row.remove();
+  if (!row) return;
+
+  const removedName = (row.dataset.originalFilename || "").trim();
+  row.remove();
+
+  // Remove associated file chip + internal file array (by filename)
+  if (removedName) {
+    const idx = bulkFiles.findIndex(f => (f?.name || "") === removedName);
+    if (idx >= 0) bulkFiles.splice(idx, 1);
+    renderChips();
+  }
 
   // re-number rows
   Array.from(document.querySelectorAll("#bulkList .bulkRow")).forEach((r, i) => {
@@ -406,6 +435,7 @@ document.addEventListener("click", (e) => {
 
   lastExtractedItems = collectBulkItems();
   updateBulkCount();
+  updateRunButtonLabel();
 });
 
 $("btnExtractBulk")?.addEventListener("click", async () => {
@@ -437,23 +467,6 @@ $("btnExtractBulk")?.addEventListener("click", async () => {
 });
 
 
-async function exportExtract(fmt){
-  if(!lastExtractedItems?.length){
-    setText("extractBulkStatus","Nothing to export. Please Extract first.");
-    return;
-  }
-  const resp = await fetch("/dbs/export/extract", {
-    method:"POST",
-    headers: {"Content-Type":"application/json"},
-    body: JSON.stringify({format: fmt, items: lastExtractedItems})
-  });
-  if(!resp.ok){
-    const data = await resp.json().catch(()=>({}));
-    throw new Error(data?.detail || "Export failed");
-  }
-  const blob = await resp.blob();
-  downloadBlob(blob, fmt==="csv" ? "extract.csv" : "extract.xlsx");
-}
 
 async function exportResults(fmt){
   const rows = Array.from(document.querySelectorAll("#bulkList .bulkRow"));
@@ -500,10 +513,6 @@ async function exportResults(fmt){
 }
 
 
-$("btnDlExtractXlsx")?.addEventListener("click", async ()=>{
-  try{ await exportExtract("xlsx"); } catch(e){ setText("extractBulkStatus", e?.message || "Export failed."); }
-});
-$("btnDlExtractCsv")?.addEventListener("click", async ()=>{
   try{ await exportExtract("csv"); } catch(e){ setText("extractBulkStatus", e?.message || "Export failed."); }
 });
 $("btnDlResultsXlsx")?.addEventListener("click", async ()=>{
@@ -545,6 +554,11 @@ function collectBulkItems() {
       dob_day: dd.trim(),
       dob_month: mm.trim(),
       dob_year: yy.trim(),
+
+      // Option 1 rerun support
+      dirty: row.dataset.dirty === "1",
+      existing_status: (row.dataset.statusFinal || row.dataset.status || "").trim(),
+      existing_pdf_filename: (row.dataset.pdfFilename || "").trim(),
     };
   });
 }
@@ -561,33 +575,47 @@ function updateBulkUIFromStatus(data) {
   rows.forEach((r, idx) => {
     const tr = document.querySelector(`#bulkList .bulkRow[data-row="${idx + 1}"]`);
     if (!tr) return;
-    tr.dataset.status = r.status || "";
+
+    const st = (r.status || "").trim();
+    tr.dataset.status = st;
+
+    // persist latest final status / pdf info for rerun support
+    if (st && st !== "running" && st !== "queued") tr.dataset.statusFinal = st;
+    if (r.pdf_filename) tr.dataset.pdfFilename = r.pdf_filename;
+    if (r.pdf_url) tr.dataset.pdfUrl = r.pdf_url;
+
     const statusCell = tr.querySelector(".statusCell");
     const dlCell = tr.querySelector(".dlCell");
 
-        statusCell.innerHTML = "";
-    statusCell.appendChild(buildBadge(r.status));
-    if (r.status === "running") {
-      const bar = document.createElement("div");
-      bar.className = "miniProgress";
-      bar.textContent = "██████░░░░";
-      statusCell.appendChild(bar);
+    if (statusCell){
+      statusCell.innerHTML = "";
+      statusCell.appendChild(buildBadge(st));
+      if (st === "running") {
+        const bar = document.createElement("div");
+        bar.className = "miniProgress";
+        bar.textContent = "██████░░░░";
+        statusCell.appendChild(bar);
+      }
     }
 
-    if (r.status === "running" || r.status === "queued") {
-      dlCell.innerHTML = "";
+    // Output column rules: spinner while running, download if exists, empty otherwise
+    if (!dlCell) return;
+    if (st === "running" || st === "queued") {
+      dlCell.innerHTML = `<div class="miniSpinner" aria-label="Running"></div>`;
       return;
     }
-
-    if (r.status === "portal_unavailable") {
-      dlCell.innerHTML = `<span class="muted">Portal Unavailable</span>`;
-      return;
-    }
-
     if (r.pdf_url) {
       dlCell.innerHTML = `<a class="btnSmall downloadBtn" href="${r.pdf_url}">⬇ Download PDF</a>`;
     } else {
       dlCell.innerHTML = ``;
+    }
+
+    // Clear dirty flag once row is completed in the latest job
+    if (data.state === "done") {
+    window._freezeExports = false;
+      tr.dataset.dirty = "";
+      // clear per-field edited markers (visual only)
+      tr.querySelectorAll("input.cell").forEach(inp => { inp.dataset.edited = ""; });
     }
   });
 
@@ -606,10 +634,16 @@ function updateBulkUIFromStatus(data) {
 
   // Enable results downloads when at least one row is finished
   const anyDone = rows.some(rr => rr.status && rr.status !== "queued" && rr.status !== "running");
-  setDisabled("btnDlResultsXlsx", !anyDone);
-  setDisabled("btnDlResultsCsv", !anyDone);
+  if (window._freezeExports) {
+    setDisabled("btnDlResultsXlsx", true);
+    setDisabled("btnDlResultsCsv", true);
+  } else {
+    setDisabled("btnDlResultsXlsx", !anyDone);
+    setDisabled("btnDlResultsCsv", !anyDone);
+  }
 
   if (data.state === "done") {
+    window._freezeExports = false;
     stopPolling();
     setDisabled("btnRunBulk", false);
     const runBtn = $("btnRunBulk");
@@ -618,6 +652,7 @@ function updateBulkUIFromStatus(data) {
     setText("runBulkStatus", `Completed ${done}/${total}`);
     toast(`Run complete (${done}/${total})`, "bottom-right");
     window._lastRunCompleted = true;
+    updateRunButtonLabel();
   }
 }
 
@@ -629,17 +664,35 @@ $("btnRunBulk")?.addEventListener("click", async () => {
   if (runBtn){ runBtn.classList.add("isRunning"); runBtn.textContent = "Running…"; }
   window._lastRunCompleted = false;
 
-  const step1 = getStep1();
+    const allRows = Array.from(document.querySelectorAll("#bulkList .bulkRow"));
+  const dirtyRows = allRows.filter(r => r.dataset.dirty === "1");
+  const hasDirty = dirtyRows.length > 0;
+  const isRerun = !!window._lastJobId && hasDirty;
+
+  // Freeze exports only when user actually clicks Run again (rerun)
+  if (isRerun){
+    window._freezeExports = true;
+    // Disable ZIP + Results during rerun to avoid mixed exports
+    const zipBtn = $("btnDlZip");
+    if (zipBtn){
+      zipBtn.removeAttribute("href");
+      zipBtn.classList.add("disabledLink");
+    }
+    setDisabled("btnDlResultsXlsx", true);
+    setDisabled("btnDlResultsCsv", true);
+  }
+const step1 = getStep1();
   const items = collectBulkItems();
 
   try {
     const resp = await fetch("/dbs/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...step1, items }),
+      body: JSON.stringify({ ...step1, items, previous_job_id: (window._lastJobId || "") }),
     });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data?.detail || "Bulk run failed");
+    window._lastJobId = data.job_id || window._lastJobId || "";
 
     // init status UI
     updateBulkUIFromStatus({ rows: data.rows || [], running: { done: 0, total: (data.rows || []).length }, state: "running" });
@@ -667,4 +720,27 @@ document.addEventListener("DOMContentLoaded", () => {
   setDisabled("btnDlResultsXlsx", true);
   setDisabled("btnDlResultsCsv", true);
   updateBulkCount();
+  updateRunButtonLabel();
 });
+
+
+// Dropzone click fix (entire area clickable)
+document.addEventListener("DOMContentLoaded", () => {
+  const dz = $("dropZone");
+  const inp = $("files");
+  if (dz && inp){
+    dz.addEventListener("click", (e)=>{
+      // avoid double-trigger if clicking on internal buttons (none expected inside)
+      inp.click();
+    });
+  }
+});
+
+
+function updateRunButtonLabel(){
+  const runBtn = $("btnRunBulk");
+  if (!runBtn) return;
+  const dirty = Array.from(document.querySelectorAll("#bulkList .bulkRow")).some(r => r.dataset.dirty === "1");
+  if (window._lastJobId && dirty) runBtn.textContent = "Run again";
+  else runBtn.textContent = (runBtn.classList.contains("isRunning") ? runBtn.textContent : "Run All Checks");
+}

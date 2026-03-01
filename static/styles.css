@@ -189,6 +189,8 @@ button.danger:hover{border-color: rgba(239,68,68,.55);}
   color: var(--muted);
   margin:10px 0;
   transition: border-color .12s ease, background .12s ease;
+
+  cursor:pointer;
 }
 .dropZone.dragover{border-color: var(--primary2); background: rgba(37,99,235,.10);}
 .hiddenFile{display:none;}
@@ -410,3 +412,45 @@ a.disabledLink{ pointer-events:none; opacity:.45; filter: grayscale(.1); }
 
 /* Running button */
 #btnRunBulk.isRunning{ opacity:.9; }
+
+
+/* Row remove button (bin icon) - subtle, no aggressive red */
+.btnRemoveRow.iconBtn{
+  width:28px;height:28px;
+  border-radius:10px;
+  border:1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.btnRemoveRow.iconBtn:hover{
+  color: var(--text);
+  border-color: rgba(255,255,255,.18);
+  box-shadow: 0 0 0 3px rgba(245,158,11,.12);
+}
+
+/* Mini spinner for Output column while running */
+.miniSpinner{
+  width:16px;height:16px;
+  border-radius:999px;
+  border:2px solid rgba(255,255,255,.22);
+  border-top-color: rgba(96,165,250,.85);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* Needs Review glow pulse (subtle amber, ~2s) */
+@keyframes amberPulse{
+  0%, 75%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0); }
+  85% { box-shadow: 0 0 0 6px rgba(245,158,11,.10); }
+  92% { box-shadow: 0 0 0 10px rgba(245,158,11,.06); }
+}
+.badge.needs_review{
+  animation: amberPulse 2s ease-in-out infinite;
+}
+
+/* Edited status */
+.badge.edited{
+  border-color: rgba(96,165,250,.55);
+  color: rgba(191,219,254,1);
+  background: rgba(37,99,235,.12);
+}
