@@ -13,6 +13,23 @@ function setDisabled(id, disabled) {
 }
 
 
+// -------------------------
+// Premium bulk state (must be declared before first use)
+// -------------------------
+let bulkFiles = [];
+let lastExtractedItems = [];
+
+function updateBulkCount() {
+  setText("bulkCount", `${bulkFiles.length}/100 files selected`);
+  // Optional: update rows-ready counter if present
+  const rowEl = document.getElementById("bulkRowsCount");
+  if (rowEl) {
+    const rows = document.querySelectorAll("#bulkTbody tr").length;
+    rowEl.textContent = `${rows}/100 rows ready`;
+  }
+}
+
+
 function downloadBlob(blob, filename){
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -81,13 +98,10 @@ function ensureModeUI() {
 $("modeSingle")?.addEventListener("change", ensureModeUI);
 $("modeBulk")?.addEventListener("change", ensureModeUI);
 ensureModeUI();
-updateBulkCount();
 
 // -------------------------
-// Bulk file handling (append + drag/drop, max 20)
+// Bulk file handling (append + drag/drop, max 100)
 // -------------------------
-let bulkFiles = [];
-let lastExtractedItems = [];
 
 function escapeHtml(s){
   return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/\'/g,"&#39;");
@@ -95,7 +109,8 @@ function escapeHtml(s){
 
 function isSupportedBulkFile(f){
   const name=(f?.name||"").toLowerCase();
-  return name.endsWith(".pdf")||name.endsWith(".png")||name.endsWith(".jpg")||name.endsWith(".jpeg")||name.endsWith(".csv")||name.endsWith(".xlsx");
+  return name.endsWith(".pdf")||name.endsWith(".png")||name.endsWith(".jpg")||name.endsWith(".jpeg")||
+         name.endsWith(".webp")||name.endsWith(".csv")||name.endsWith(".xlsx")||name.endsWith(".docx");
 }
 
 function renderChips(){
@@ -110,23 +125,19 @@ function renderChips(){
     btn.type="button";
     btn.title="Remove";
     btn.textContent="×";
-    btn.addEventListener("click", ()=>{ bulkFiles.splice(idx,1); renderChips(); renderChips();
-updateBulkCount(); });
+    btn.addEventListener("click", ()=>{ bulkFiles.splice(idx,1); renderChips(); updateBulkCount(); });
     chip.appendChild(btn);
     wrap.appendChild(chip);
   });
 }
 
-function updateBulkCount() {
-  setText("bulkCount", `${bulkFiles.length}/20 files selected`);
-}
 
 function appendFiles(files) {
   const arr = Array.from(files || []);
   let rejected = 0;
   for (const f of arr) {
     if (!isSupportedBulkFile(f)) { rejected++; continue; }
-    if (bulkFiles.length >= 20) break;
+    if (bulkFiles.length >= 100) break;
     bulkFiles.push(f);
   }
   renderChips();
