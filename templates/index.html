@@ -32,13 +32,13 @@
     <section class="card">
       <h2>Step 2 — Upload DBS document</h2>
 
-      <div class="modeRow">
+      <div class="modeRow segmented">
         <span class="muted">Mode:</span>
-        <label class="radio">
+        <label class="radio segment">
           <input type="radio" name="mode" id="modeSingle" value="single" checked />
           Single check
         </label>
-        <label class="radio">
+        <label class="radio segment">
           <input type="radio" name="mode" id="modeBulk" value="bulk" />
           Multiple check (up to 20)
         </label>
@@ -93,37 +93,33 @@
 
       <!-- Bulk -->
       <div id="bulkWrap" class="hidden">
-        <div id="dropZone" class="dropZone">Drag & drop up to 20 files here</div>
-        <input id="files" type="file" accept="application/pdf,image/*" multiple class="hiddenFile" />
-        <div class="row"><button id="btnAddMore" type="button">Add more files</button></div>
+        <div id="dropZone" class="dropZone">Drag & drop up to 20 files (PDF/JPG/PNG/CSV/XLSX)</div>
+        <div id="bulkChips" class="chips"></div>
+        <input id="files" type="file" accept="application/pdf,image/*,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple class="hiddenFile" />
+        <div class="row btnRow"><button id="btnAddMore" type="button">Add more files</button>
+          <button id="btnClearAll" type="button" class="danger">Clear all</button></div>
         <div class="row">
           <button id="btnExtractBulk">Extract all</button>
-          <span id="bulkCount" class="muted"></span>
+          <span id="bulkCount" class="pill"></span>
           <span id="extractBulkStatus" class="muted"></span>
         </div>
 
         <div class="divider"></div>
 
         <h3>Extracted list (editable)</h3>
-
-        <div class="row">
-          <label class="muted">Downloads after run:</label>
-          <select id="bulkDownloadMode">
-            <option value="zip" selected>ZIP (recommended)</option>
-            <option value="individual">Individual PDFs (manual download)</option>
-          </select>
-        </div>
-
-        <div class="tableWrap">
+<div class="tableWrap">
           <table id="bulkTable">
             <thead>
               <tr>
+                <th>Remove</th>
                 <th>#</th>
+                <th>Source</th>
                 <th>Certificate No</th>
                 <th>Surname</th>
                 <th>DOB (DD/MM/YYYY)</th>
-                
-                <th>Confidence</th><th>Status</th><th>Download</th>
+                <th>Confidence</th>
+                <th>Status</th>
+                <th>Download</th>
               </tr>
             </thead>
             <tbody id="bulkTbody"></tbody>
@@ -134,23 +130,26 @@
           <button id="btnRunBulk" class="primary">Run All Checks</button>
           <span id="runBulkStatus" class="muted"></span>
         </div>
-        <div class="row">
-          <a id="zipLink" class="btnLink hidden" href="#" download>Download ZIP</a>
-        </div>
-<h3>Downloads</h3>
+        <h3>Downloads</h3>
           <div class="row">
             <a id="zipLink" class="btnLink hidden" href="#" download>Download ZIP</a>
           </div>
+          <div id="zipNotice" class="muted"></div>
           <div class="tableWrap">
             <table id="resultsTable">
               <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Status</th>
-                  <th>Filename</th>
-                  <th>Download</th>
-                </tr>
-              </thead>
+              <tr>
+                <th>Remove</th>
+                <th>#</th>
+                <th>Source</th>
+                <th>Certificate No</th>
+                <th>Surname</th>
+                <th>DOB (DD/MM/YYYY)</th>
+                <th>Confidence</th>
+                <th>Status</th>
+                <th>Download</th>
+              </tr>
+            </thead>
               <tbody id="resultsTbody"></tbody>
             </table>
           </div>

@@ -6,6 +6,7 @@ if sys.platform.startswith("win"):
 
 import os
 import io
+import csv
 import json
 import re
 import secrets
@@ -625,21 +626,190 @@ def _safe_filename(name: str, default: str) -> str:
 
 # -------------------------
 # Extract (single or bulk)
+# ---------------
 # -------------------------
+# Spreadsheet parsing (CSV/XLSX) for bulk mode
+# -------------------------
+def _norm_col(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (name or "").strip().lower())
+
+def _parse_dob_value(v: Any) -> Tuple[str, str, str]:
+    """Return (dd, mm, yyyy) as strings from a variety of common DOB formats."""
+    if v is None:
+        return ("", "", "")
+    # openpyxl may return datetime/date
+    if isinstance(v, (datetime.date, datetime.datetime)):
+        d = v.date() if isinstance(v, datetime.datetime) else v
+        return (str(d.day).zfill(2), str(d.month).zfill(2), str(d.year))
+    s = str(v).strip()
+    if not s:
+        return ("", "", "")
+    # Accept YYYY-MM-DD
+    m = re.match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$", s)
+    if m:
+        yy, mm, dd = m.group(1), m.group(2), m.group(3)
+        return (dd.zfill(2), mm.zfill(2), yy)
+    # Accept DD/MM/YYYY or DD-MM-YYYY
+    m = re.match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$", s)
+    if m:
+        dd, mm, yy = m.group(1), m.group(2), m.group(3)
+        return (dd.zfill(2), mm.zfill(2), yy)
+    return ("", "", "")
+
+def parse_csv_rows(content: bytes) -> List[Dict[str, Any]]:
+    # Try utf-8-sig first, then latin-1
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            text = content.decode(enc)
+            break
+        except Exception:
+            continue
+    if text is None:
+        raise ValueError("Unable to read CSV encoding.")
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("CSV has no header row.")
+    cols = { _norm_col(c): c for c in reader.fieldnames }
+    return _rows_from_dict_iter(reader, cols)
+
+def parse_xlsx_rows(content: bytes) -> List[Dict[str, Any]]:
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        raise ValueError("openpyxl is not installed (required for .xlsx).")
+    wb = load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise ValueError("Excel sheet is empty.")
+    headers = [str(h).strip() if h is not None else "" for h in rows[0]]
+    if not any(headers):
+        raise ValueError("Excel sheet header row is missing.")
+    cols = { _norm_col(c): c for c in headers }
+    dict_rows = []
+    for r in rows[1:]:
+        d = {}
+        for idx, h in enumerate(headers):
+            if not h:
+                continue
+            d[h] = r[idx] if idx < len(r) else None
+        dict_rows.append(d)
+    return _rows_from_dict_iter(dict_rows, cols)
+
+def _rows_from_dict_iter(iterable, cols_norm_to_original: Dict[str, str]) -> List[Dict[str, Any]]:
+    # Column mapping (case-insensitive + common variants)
+    cert_keys = ["certificatenumber", "certno", "certnumber", "certificate", "cert"]
+    surname_keys = ["surname", "lastname", "last_name"]
+    dob_single_keys = ["dob", "dateofbirth", "dateofbirthddmmyyyy"]
+    dd_keys = ["dobday", "day", "dd"]
+    mm_keys = ["dobmonth", "month", "mm"]
+    yy_keys = ["dobyear", "year", "yyyy", "yy"]
+
+    def first_present(keys):
+        for k in keys:
+            if k in cols_norm_to_original:
+                return cols_norm_to_original[k]
+        return None
+
+    cert_col = first_present(cert_keys)
+    surname_col = first_present([_norm_col(k) for k in surname_keys])
+    dob_col = first_present(dob_single_keys)
+    dd_col = first_present(dd_keys)
+    mm_col = first_present(mm_keys)
+    yy_col = first_present(yy_keys)
+
+    if not cert_col or not surname_col or not (dob_col or (dd_col and mm_col and yy_col)):
+        raise ValueError("Spreadsheet must include Certificate No, Surname, and DOB columns (DOB or DOB Day/Month/Year).")
+
+    out: List[Dict[str, Any]] = []
+    for d in iterable:
+        if not d:
+            continue
+        cert = str(d.get(cert_col) or "").strip()
+        surname = str(d.get(surname_col) or "").strip()
+        if dob_col:
+            dd, mm, yy = _parse_dob_value(d.get(dob_col))
+        else:
+            dd = str(d.get(dd_col) or "").strip().zfill(2) if str(d.get(dd_col) or "").strip() else ""
+            mm = str(d.get(mm_col) or "").strip().zfill(2) if str(d.get(mm_col) or "").strip() else ""
+            yy = str(d.get(yy_col) or "").strip()
+        # skip blank rows
+        if not (cert or surname or (dd and mm and yy)):
+            continue
+        out.append({
+            "certificate_number": cert,
+            "surname": surname,
+            "dob_day": dd,
+            "dob_month": mm,
+            "dob_year": yy,
+        })
+    return out
+----------
 @app.post("/dbs/extract")
 async def dbs_extract(files: List[UploadFile] = File(...)):
     if not files:
         raise HTTPException(status_code=400, detail="No file uploaded.")
 
     items: List[Dict[str, Any]] = []
+    total_rows_cap = 100
 
+    # Hard limit: 20 uploaded files (as per spec)
     for file in files[:20]:
         content = await file.read()
-        filename = (file.filename or "").lower()
+        fname = (file.filename or "")
+        filename = fname.lower()
 
         if len(content) > 25 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large. Please upload a PDF/image under 25MB.")
+            raise HTTPException(status_code=413, detail="File too large. Please upload files under 25MB.")
 
+        # If spreadsheet: expand into rows (details already present)
+        if filename.endswith(".csv") or filename.endswith(".xlsx"):
+            try:
+                if filename.endswith(".csv"):
+                    rows = parse_csv_rows(content)
+                else:
+                    rows = parse_xlsx_rows(content)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Spreadsheet '{fname}' could not be read: {str(e)}")
+
+            for r_idx, r in enumerate(rows, start=2):  # 2 = header is row 1
+                if len(items) >= total_rows_cap:
+                    break
+                cert_val = (r.get("certificate_number") or "").strip()
+                surname_val = (r.get("surname") or "").strip()
+                dob_dd = str(r.get("dob_day") or "").strip()
+                dob_mm = str(r.get("dob_month") or "").strip()
+                dob_yy = str(r.get("dob_year") or "").strip()
+
+                source = {"certificate_number": "Spreadsheet", "surname": "Spreadsheet", "dob": "Spreadsheet"}
+
+                cert_conf = score_cert_number(cert_val)
+                surname_conf = score_surname(surname_val, source="Spreadsheet")
+                dob_conf = score_dob(dob_dd, dob_mm, dob_yy, source="Spreadsheet")
+                overall = overall_confidence(cert_conf, surname_conf, dob_conf)
+
+                items.append({
+                    "original_filename": f"{fname} (Row {r_idx})",
+                    "certificate_number": cert_val,
+                    "surname": surname_val,
+                    "dob_day": dob_dd,
+                    "dob_month": dob_mm,
+                    "dob_year": dob_yy,
+                    "confidence": {
+                        "certificate_number": cert_conf,
+                        "surname": surname_conf,
+                        "dob": dob_conf,
+                        "overall": overall,
+                    },
+                    "source": source,
+                })
+
+            if len(items) >= total_rows_cap:
+                break
+            continue
+
+        # Otherwise: treat as PDF/image (extract)
         # v2: No Issue Date anywhere
         fields: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None}
         source: Dict[str, str] = {"certificate_number": "", "surname": "", "dob": ""}
@@ -655,11 +825,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 if fields.get("dob"):
                     source["dob"] = "PDF text"
 
-            if (
-                not fields.get("certificate_number")
-                or not fields.get("surname")
-                or not fields.get("dob")
-            ):
+            if (not fields.get("certificate_number") or not fields.get("surname") or not fields.get("dob")):
                 try:
                     imgs = pdf_to_images_bytes(content, max_pages=1, dpi=240)
                 except Exception as e:
@@ -669,7 +835,6 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 for k in ["certificate_number", "surname", "dob"]:
                     if not fields.get(k) and vision.get(k):
                         fields[k] = vision.get(k)
-                        # Do not mention AI; keep neutral wording.
                         source[k] = "Image scan"
         else:
             is_png = content[:8] == b"\x89PNG\r\n\x1a\n"
@@ -697,8 +862,8 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
         dob_conf = score_dob(dob_dd, dob_mm, dob_yy, source=source.get("dob") or "")
         overall = overall_confidence(cert_conf, surname_conf, dob_conf)
 
-        resp_item = {
-            "original_filename": file.filename or "",
+        items.append({
+            "original_filename": fname,
             "certificate_number": cert_val,
             "surname": surname_val,
             "dob_day": dob_dd,
@@ -711,12 +876,16 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 "overall": overall,
             },
             "source": source,
-        }
-        items.append(resp_item)
+        })
+
+        if len(items) >= total_rows_cap:
+            break
+
+    if len(items) >= total_rows_cap and len(files) > 0:
+        # Soft notice (UI can show it)
+        return JSONResponse({"items": items, "notice": "Row limit reached (100). Extra rows were skipped."})
 
     return JSONResponse({"items": items})
-
-
 
 # -------------------------
 # Run DBS (single returns PDF; bulk returns job + links/zip)
@@ -799,7 +968,7 @@ async def _process_bulk_job(
 
     pdf_names: List[str] = []
 
-    for i, it in enumerate(items[:20], start=1):
+    for i, it in enumerate(items[:100], start=1):
         meta = JOBS.get(job_id)
         if not meta:
             return
@@ -898,16 +1067,24 @@ async def _process_bulk_job(
     if not meta:
         return
 
-    zip_name = _safe_filename(f"DBS_Checks_{checked_date}.zip", "DBS_Checks.zip")
-    zip_path = job_dir / zip_name
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for pdfn in pdf_names:
-            fp = job_dir / pdfn
-            if fp.exists():
-                zf.write(fp, arcname=pdfn)
+    if pdf_names:
+        zip_name = _safe_filename(f"DBS_Checks_{checked_date}.zip", "DBS_Checks.zip")
+        zip_path = job_dir / zip_name
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for pdfn in pdf_names:
+                fp = job_dir / pdfn
+                if fp.exists():
+                    zf.write(fp, arcname=pdfn)
 
-    meta["zip_name"] = zip_name
-    meta["zip_ready"] = True
+        meta["zip_name"] = zip_name
+        meta["zip_ready"] = True
+        meta["message"] = ""
+    else:
+        # Professional: do not offer an empty ZIP
+        meta["zip_name"] = ""
+        meta["zip_ready"] = False
+        meta["message"] = "No PDFs available because the DBS portal is unavailable. Please try again later."
+
     meta["state"] = "done"
     _release_lock(job_id)
     _touch_job(job_id)
@@ -948,7 +1125,7 @@ async def dbs_run(request: Request):
         job_id, job_dir = _new_job_dir(prefix="dbs", sid=sid, mode="bulk")
         meta = JOBS[job_id]
         meta["rows"] = [
-            {"row": i + 1, "status": "queued", "filename": "", "pdf_url": "", "error": ""} for i in range(min(20, len(items)))
+            {"row": i + 1, "status": "queued", "filename": "", "pdf_url": "", "error": ""} for i in range(min(100, len(items)))
         ]
         meta["state"] = "running"
 

@@ -73,22 +73,71 @@ ensureModeUI();
 // Bulk file handling (append + drag/drop, max 20)
 // -------------------------
 let bulkFiles = [];
+let lastExtractedItems = [];
+
+function escapeHtml(s){
+  return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/\'/g,"&#39;");
+}
+
+function isSupportedBulkFile(f){
+  const name=(f?.name||"").toLowerCase();
+  return name.endsWith(".pdf")||name.endsWith(".png")||name.endsWith(".jpg")||name.endsWith(".jpeg")||name.endsWith(".csv")||name.endsWith(".xlsx");
+}
+
+function renderChips(){
+  const wrap=$("bulkChips");
+  if(!wrap) return;
+  wrap.innerHTML="";
+  bulkFiles.forEach((f, idx)=>{
+    const chip=document.createElement("span");
+    chip.className="chip";
+    chip.innerHTML=`<span title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>`;
+    const btn=document.createElement("button");
+    btn.type="button";
+    btn.title="Remove";
+    btn.textContent="×";
+    btn.addEventListener("click", ()=>{ bulkFiles.splice(idx,1); renderChips(); renderChips();
+updateBulkCount(); });
+    chip.appendChild(btn);
+    wrap.appendChild(chip);
+  });
+}
 
 function updateBulkCount() {
-  setText("bulkCount", `${bulkFiles.length} file(s) selected (max 20)`);
+  setText("bulkCount", `${bulkFiles.length}/20 files selected`);
 }
 
 function appendFiles(files) {
   const arr = Array.from(files || []);
+  let rejected = 0;
   for (const f of arr) {
+    if (!isSupportedBulkFile(f)) { rejected++; continue; }
     if (bulkFiles.length >= 20) break;
     bulkFiles.push(f);
   }
+  renderChips();
   updateBulkCount();
+  if (rejected) setText("extractBulkStatus", `Skipped ${rejected} unsupported file(s).`);
 }
 
 $("btnAddMore")?.addEventListener("click", () => {
   $("files").click();
+});
+
+$("btnClearAll")?.addEventListener("click", () => {
+  bulkFiles = [];
+  lastExtractedItems = [];
+  renderChips();
+  updateBulkCount();
+  const tbody = $("bulkTbody");
+  if (tbody) tbody.innerHTML = "";
+  const rtb = $("resultsTbody");
+  if (rtb) rtb.innerHTML = "";
+  setText("extractBulkStatus", "");
+  setText("runBulkStatus", "");
+  setText("zipNotice", "");
+  const zip = $("zipLink");
+  if (zip) zip.classList.add("hidden");
 });
 
 $("files")?.addEventListener("change", (e) => {
@@ -213,7 +262,9 @@ function renderBulkTable(items) {
     const overall = conf.overall ?? "";
 
     tr.innerHTML = `
+      <td><button type="button" class="btnTiny danger btnRemoveRow" data-idx="${idx}">Remove</button></td>
       <td>${idx + 1}</td>
+      <td class="muted">${escapeHtml(it.original_filename || "")}</td>
       <td><input class="cell cert" value="${it.certificate_number || ""}"></td>
       <td><input class="cell surname" value="${it.surname || ""}"></td>
       <td class="dob">
@@ -234,6 +285,20 @@ function renderBulkTable(items) {
     `;
     tbody.appendChild(tr);
   });
+
+// Remove row in extracted table
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest?.(".btnRemoveRow");
+  if (!btn) return;
+  const tr = btn.closest("tr");
+  if (tr) tr.remove();
+  // re-number rows
+  Array.from(document.querySelectorAll("#bulkTbody tr")).forEach((row, i) => {
+    row.dataset.row = String(i + 1);
+    const numCell = row.querySelector("td:nth-child(2)");
+    if (numCell) numCell.textContent = String(i + 1);
+  });
+});
 }
 
 $("btnExtractBulk")?.addEventListener("click", async () => {
@@ -251,8 +316,10 @@ $("btnExtractBulk")?.addEventListener("click", async () => {
     const resp = await fetch("/dbs/extract", { method: "POST", body: fd });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data?.detail || "Bulk extraction failed");
-    renderBulkTable(data.items || []);
-    setText("extractBulkStatus", "Done.");
+    lastExtractedItems = data.items || [];
+    renderBulkTable(lastExtractedItems);
+    setText("extractBulkStatus", data.notice ? data.notice : "Done.");
+    setText("zipNotice", "");
   } catch (err) {
     setText("extractBulkStatus", err?.message || "Bulk extraction failed.");
   } finally {
@@ -313,7 +380,12 @@ function updateBulkUIFromStatus(data) {
     }
 
     if (r.status === "portal_unavailable") {
-      dlCell.innerHTML = `<span class="muted">No output</span>`;
+      dlCell.innerHTML = `<span class="muted">No output (portal unavailable)</span>`;
+      // Show user-friendly message under status
+      const msg = document.createElement("div");
+      msg.className = "submsg";
+      msg.textContent = "DBS portal unavailable (maintenance). Try later.";
+      statusCell.appendChild(msg);
       return;
     }
 
@@ -325,6 +397,7 @@ function updateBulkUIFromStatus(data) {
   });
 
   const zipBtn = $("zipLink");
+  if ($("zipNotice")) setText("zipNotice", data.message || "");
   if (zipBtn) {
     if (data.zip_ready && data.zip_url) {
       zipBtn.href = data.zip_url;
