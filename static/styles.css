@@ -265,6 +265,9 @@ button.danger:hover{border-color: rgba(239,68,68,.55);}
 
 .statusWrap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .dlWrap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.dlCell{display:flex;align-items:center;min-height:34px;}
+.downloadBtn{display:inline-flex;align-items:center;gap:6px;height:34px;line-height:34px;}
+.miniSpinner{margin-left:2px;}
 
 .bulkMeta{margin-top:8px;display:flex;align-items:center;justify-content:flex-start;gap:10px;flex-wrap:wrap;}
 .confLine{font-size:12px;color:var(--muted);}
@@ -418,16 +421,20 @@ a.disabledLink{ pointer-events:none; opacity:.45; filter: grayscale(.1); }
 .btnRemoveRow.iconBtn{
   width:28px;height:28px;
   border-radius:10px;
-  border:1px solid transparent;
+  border:1px solid rgba(255,77,77,.55);
   background: transparent;
-  color: var(--muted);
-}
-.btnRemoveRow.iconBtn:hover{
-  color: var(--text);
-  border-color: rgba(255,255,255,.18);
-  box-shadow: 0 0 0 3px rgba(245,158,11,.12);
+  color: rgba(255,77,77,.95);
+  box-shadow: 0 0 0 0 rgba(255,77,77,0);
 }
 
+
+
+.btnRemoveRow.iconBtn:hover{
+  background: rgba(255,77,77,.08);
+  border-color: rgba(255,77,77,.85);
+  box-shadow: 0 0 10px rgba(255,77,77,.22);
+  transform: scale(1.04);
+}
 /* Mini spinner for Output column while running */
 .miniSpinner{
   width:16px;height:16px;

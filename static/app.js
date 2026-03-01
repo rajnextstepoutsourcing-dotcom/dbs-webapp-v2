@@ -137,6 +137,36 @@ function escapeHtml(s){
   return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/\'/g,"&#39;");
 }
 
+// Month normalization (OCR text -> numeric MM)
+const _MONTH_MAP = {
+  jan:"01", january:"01",
+  feb:"02", february:"02",
+  mar:"03", march:"03",
+  apr:"04", april:"04",
+  may:"05",
+  jun:"06", june:"06",
+  jul:"07", july:"07",
+  aug:"08", august:"08",
+  sep:"09", sept:"09", september:"09",
+  oct:"10", october:"10",
+  nov:"11", november:"11",
+  dec:"12", december:"12",
+};
+function normalizeMonthToMM(v){
+  if(v==null) return "";
+  let s = String(v).trim().toLowerCase();
+  s = s.replace(/[^a-z0-9]/g, "");
+  if(s === "augl") s = "aug";
+  if(/^\d{1,2}$/.test(s)){
+    const n = parseInt(s,10);
+    if(n>=1 && n<=12) return String(n).padStart(2,"0");
+  }
+  if(_MONTH_MAP[s]) return _MONTH_MAP[s];
+  if(s.length>=3 && _MONTH_MAP[s.slice(0,3)]) return _MONTH_MAP[s.slice(0,3)];
+  return "";
+}
+
+
 function isSupportedBulkFile(f){
   const name=(f?.name||"").toLowerCase();
   return name.endsWith(".pdf")||name.endsWith(".png")||name.endsWith(".jpg")||name.endsWith(".jpeg")||
@@ -317,7 +347,7 @@ function renderBulkTable(items) {
     row.dataset.originalFilename = it.original_filename || "";
     row.dataset.forename = it.forename || "";
     row.dataset.issueDay = it.issue_day || "";
-    row.dataset.issueMonth = it.issue_month || "";
+    row.dataset.issueMonth = normalizeMonthToMM(it.issue_month || "");
     row.dataset.issueYear = it.issue_year || "";
 
     const conf = it.confidence || {};
@@ -355,7 +385,7 @@ function renderBulkTable(items) {
             <div class="fieldLabel">DOB</div>
             <div class="fieldRow">
               <input class="cell dd" value="${it.dob_day || ""}" placeholder="DD">
-              <input class="cell mm" value="${it.dob_month || ""}" placeholder="MM">
+               <input class="cell mm" value="${normalizeMonthToMM(it.dob_month || "" )}" placeholder="MM">
               <input class="cell yy" value="${it.dob_year || ""}" placeholder="YYYY">
             </div>
             <div class="fieldHint">${confHint(conf.dob || 0, false)}</div>
@@ -480,6 +510,7 @@ async function exportResults(fmt){
     const surname = row.querySelector("input.surname")?.value || "";
     const dd = row.querySelector("input.dd")?.value || "";
     const mm = row.querySelector("input.mm")?.value || "";
+    const mmNorm = normalizeMonthToMM(mm);
     const yy = row.querySelector("input.yy")?.value || "";
     const statusText = row.querySelector(".badge")?.className?.includes("clear") ? "clear"
                     : row.querySelector(".badge")?.className?.includes("needs_review") ? "needs_review"
@@ -492,8 +523,11 @@ async function exportResults(fmt){
       surname,
       certificate_number: cert,
       dob_day: dd,
-      dob_month: mm,
+      dob_month: normalizeMonthToMM(mm),
       dob_year: yy,
+      issue_day: row.dataset.issueDay || "",
+      issue_month: normalizeMonthToMM(row.dataset.issueMonth || ""),
+      issue_year: row.dataset.issueYear || "",
       status: statusLabel(statusText) ? statusText : (row.dataset.status||statusText||""),
       pdf_filename: pdfFilename
     };
@@ -538,17 +572,18 @@ function collectBulkItems() {
     const surname = row.querySelector("input.surname")?.value || "";
     const dd = row.querySelector("input.dd")?.value || "";
     const mm = row.querySelector("input.mm")?.value || "";
+    const mmNorm = normalizeMonthToMM(mm);
     const yy = row.querySelector("input.yy")?.value || "";
     return {
       original_filename: row.dataset.originalFilename || "",
       forename: row.dataset.forename || "",
       issue_day: row.dataset.issueDay || "",
-      issue_month: row.dataset.issueMonth || "",
+      issue_month: normalizeMonthToMM(row.dataset.issueMonth || ""),
       issue_year: row.dataset.issueYear || "",
       certificate_number: cert.trim(),
       surname: surname.trim(),
       dob_day: dd.trim(),
-      dob_month: mm.trim(),
+      dob_month: mmNorm.trim(),
       dob_year: yy.trim(),
 
       // Option 1 rerun support

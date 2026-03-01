@@ -1244,7 +1244,6 @@ async def _process_bulk_job(
             return
 
         row = meta["rows"][i - 1]
-        row["status"] = "running"
         row["error"] = ""
         _touch_job(job_id)
 
@@ -1302,6 +1301,8 @@ async def _process_bulk_job(
                 row["filename"] = final_name
                 row["pdf_url"] = f"/dbs/download/{job_id}/{final_name}"
                 continue
+        # Mark running only for rows that will actually be processed (dirty or no reusable output)
+        row["status"] = "running"
         cert = validate_cert_number(certificate_number)
 
         if not cert:
@@ -1451,9 +1452,24 @@ async def dbs_run(request: Request):
         meta["rows"] = []
         for i in range(min(100, len(items))):
             it = items[i] if isinstance(items[i], dict) else {}
+            it0 = it
+            dirty0 = bool(it0.get("dirty"))
+            ex_status0 = (it0.get("existing_status") or "").strip()
+            ex_pdf0 = (it0.get("existing_pdf_filename") or "").strip()
+            # If rerun and row is not dirty, keep previous status/output visible immediately
+            init_status = "queued"
+            init_pdf_filename = ""
+            init_pdf_url = ""
+            if previous_job_id and (not dirty0) and ex_pdf0:
+                st0 = ex_status0 if ex_status0 else "needs_review"
+                if st0 not in ["clear","needs_review","portal_unavailable"]:
+                    st0 = "needs_review"
+                init_status = st0
+                init_pdf_filename = ex_pdf0 if st0 != "portal_unavailable" else ""
+                init_pdf_url = (f"/dbs/download/{previous_job_id}/{ex_pdf0}" if init_pdf_filename else "")
             meta["rows"].append({
                 "row": i + 1,
-                "status": "queued",
+                "status": init_status,
                 "certificate_number": (it.get("certificate_number") or ""),
                 "surname": (it.get("surname") or ""),
                 "forename": (it.get("forename") or ""),
@@ -1467,8 +1483,8 @@ async def dbs_run(request: Request):
                 "dirty": bool(it.get("dirty")),
                 "existing_status": (it.get("existing_status") or ""),
                 "existing_pdf_filename": (it.get("existing_pdf_filename") or ""),
-                "pdf_filename": "",
-                "pdf_url": "",
+                "pdf_filename": init_pdf_filename,
+                "pdf_url": init_pdf_url,
                 "error": "",
             })
 
