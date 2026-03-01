@@ -745,7 +745,6 @@ def _rows_from_dict_iter(iterable, cols_norm_to_original: Dict[str, str]) -> Lis
             "dob_year": yy,
         })
     return out
-----------
 @app.post("/dbs/extract")
 async def dbs_extract(files: List[UploadFile] = File(...)):
     if not files:
