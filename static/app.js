@@ -1,9 +1,15 @@
-
 const $ = (id) => document.getElementById(id);
 
-function setStatus(el, msg) {
+function setText(id, msg) {
+  const el = $(id);
   if (!el) return;
   el.textContent = msg || "";
+}
+
+function setDisabled(id, disabled) {
+  const el = $(id);
+  if (!el) return;
+  el.disabled = !!disabled;
 }
 
 function fillField(id, value) {
@@ -12,7 +18,7 @@ function fillField(id, value) {
   el.value = value || "";
 }
 
-function setConf(id, value) {
+function setConf(id, value, label = "Confidence") {
   const el = $(id);
   if (!el) return;
   if (value === null || value === undefined || value === "") {
@@ -20,8 +26,7 @@ function setConf(id, value) {
     return;
   }
   const pct = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
-  // Neutral naming (no AI mention)
-  el.textContent = `Verification: ${pct}%`;
+  el.textContent = `${label}: ${pct}%`;
 }
 
 function getStep1() {
@@ -32,275 +37,345 @@ function getStep1() {
   };
 }
 
-function parseFilenameFromDisposition(disposition) {
-  if (!disposition) return "";
-  // Content-Disposition: attachment; filename="ABC.pdf"
-  const m = /filename\*?=(?:UTF-8''|")?([^\";]+)"?/i.exec(disposition);
-  if (!m) return "";
-  try {
-    return decodeURIComponent(m[1]);
-  } catch {
-    return m[1];
-  }
+function statusLabel(status) {
+  if (!status) return "";
+  if (status === "queued") return "Queued";
+  if (status === "running") return "Running…";
+  if (status === "clear") return "✅ Clear";
+  if (status === "not_on_update_service") return "⚠ Not on Update Service";
+  if (status === "needs_review") return "❌ Needs Review";
+  if (status === "portal_unavailable") return "⛔ Portal Unavailable";
+  return status;
 }
 
-async function downloadBlobWithFilename(resp) {
-  const blob = await resp.blob();
-  const disposition = resp.headers.get("Content-Disposition") || "";
-  const filename = parseFilenameFromDisposition(disposition) || "download.pdf";
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.URL.revokeObjectURL(url);
+function badgeClass(status) {
+  return `badge ${status || ""}`.trim();
 }
 
-function switchMode(mode) {
-  const singleWrap = $("singleWrap");
-  const bulkWrap = $("bulkWrap");
-  if (mode === "bulk") {
-    singleWrap.classList.add("hidden");
-    bulkWrap.classList.remove("hidden");
-  } else {
-    bulkWrap.classList.add("hidden");
-    singleWrap.classList.remove("hidden");
-  }
+function buildBadge(status) {
+  const span = document.createElement("span");
+  span.className = badgeClass(status);
+  span.textContent = statusLabel(status);
+  return span;
 }
 
-// ---- Mode UI ----
-$("modeSingle").addEventListener("change", () => switchMode("single"));
-$("modeBulk").addEventListener("change", () => switchMode("bulk"));
+function ensureModeUI() {
+  const mode = $("modeBulk").checked ? "bulk" : "single";
+  $("singleWrap").classList.toggle("hidden", mode !== "single");
+  $("bulkWrap").classList.toggle("hidden", mode !== "bulk");
+}
 
-$("files").addEventListener("change", () => {
-  const n = $("files").files ? $("files").files.length : 0;
-  if (n > 20) {
-    setStatus($("bulkCount"), "Max 20 files. Please select 20 or fewer.");
-  } else {
-    setStatus($("bulkCount"), `${n}/20 selected`);
+$("modeSingle")?.addEventListener("change", ensureModeUI);
+$("modeBulk")?.addEventListener("change", ensureModeUI);
+ensureModeUI();
+
+// -------------------------
+// Bulk file handling (append + drag/drop, max 20)
+// -------------------------
+let bulkFiles = [];
+
+function updateBulkCount() {
+  setText("bulkCount", `${bulkFiles.length} file(s) selected (max 20)`);
+}
+
+function appendFiles(files) {
+  const arr = Array.from(files || []);
+  for (const f of arr) {
+    if (bulkFiles.length >= 20) break;
+    bulkFiles.push(f);
   }
+  updateBulkCount();
+}
+
+$("btnAddMore")?.addEventListener("click", () => {
+  $("files").click();
 });
 
-// ---- Single extract ----
-$("btnExtract").addEventListener("click", async () => {
-  const f = $("file").files && $("file").files[0];
-  if (!f) {
-    setStatus($("extractStatus"), "Please choose a file.");
+$("files")?.addEventListener("change", (e) => {
+  appendFiles(e.target.files);
+  // reset input so selecting same file again still triggers
+  e.target.value = "";
+});
+
+const dz = $("dropZone");
+if (dz) {
+  dz.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dz.classList.add("dragover");
+  });
+  dz.addEventListener("dragleave", () => dz.classList.remove("dragover"));
+  dz.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dz.classList.remove("dragover");
+    appendFiles(e.dataTransfer.files);
+  });
+}
+
+updateBulkCount();
+
+// -------------------------
+// Extract (single)
+// -------------------------
+$("btnExtract")?.addEventListener("click", async () => {
+  const file = $("file").files?.[0];
+  if (!file) {
+    setText("extractStatus", "Please choose a file first.");
     return;
   }
-  setStatus($("extractStatus"), "Extracting…");
+  setText("extractStatus", "Extracting…");
+  setDisabled("btnExtract", true);
+
+  const fd = new FormData();
+  fd.append("files", file);
+
   try {
-    const fd = new FormData();
-    fd.append("files", f);
-
     const resp = await fetch("/dbs/extract", { method: "POST", body: fd });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || "Extract failed.");
-    }
     const data = await resp.json();
-    const item = (data.items && data.items[0]) || {};
+    if (!resp.ok) throw new Error(data?.detail || "Extraction failed");
 
+    const item = (data.items || [])[0] || {};
     fillField("certificate_number", item.certificate_number);
     fillField("surname_extracted", item.surname);
     fillField("dob_day", item.dob_day);
     fillField("dob_month", item.dob_month);
     fillField("dob_year", item.dob_year);
-    fillField("issue_day", item.issue_day);
-    fillField("issue_month", item.issue_month);
-    fillField("issue_year", item.issue_year);
 
-    setConf("conf_cert", item.confidence?.certificate_number);
-    setConf("conf_surname", item.confidence?.surname);
-    setConf("conf_dob", item.verification_score ?? item.confidence?.dob);
-    setConf("conf_issue", item.confidence?.issue_date);
+    setConf("conf_cert", item.confidence?.certificate_number, "Confidence");
+    setConf("conf_surname", item.confidence?.surname, "Confidence");
+    setConf("conf_dob", item.confidence?.dob, "Confidence");
+    setConf("conf_overall", item.confidence?.overall, "Overall Confidence");
 
-    setStatus($("extractStatus"), "Done. Review/edit fields if needed.");
-  } catch (e) {
-    setStatus($("extractStatus"), String(e.message || e));
+    setText("extractStatus", "Done.");
+  } catch (err) {
+    setText("extractStatus", err?.message || "Extraction failed.");
+  } finally {
+    setDisabled("btnExtract", false);
   }
 });
 
-// ---- Single run ----
-$("btnRun").addEventListener("click", async () => {
+// -------------------------
+// Run (single)
+// -------------------------
+$("btnRun")?.addEventListener("click", async () => {
+  setText("runStatus", "");
+  setDisabled("btnRun", true);
+
   const step1 = getStep1();
   const payload = {
     ...step1,
     certificate_number: ($("certificate_number").value || "").trim(),
-    surname_user: ($("surname_user").value || "").trim(),
     surname_extracted: ($("surname_extracted").value || "").trim(),
+    surname_user: ($("surname_user").value || "").trim(),
     dob_day: ($("dob_day").value || "").trim(),
     dob_month: ($("dob_month").value || "").trim(),
     dob_year: ($("dob_year").value || "").trim(),
   };
 
-  setStatus($("runStatus"), "Running…");
   try {
     const resp = await fetch("/dbs/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data?.detail || "Run failed");
 
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail?.message || err.detail || "Run failed.");
+    if (data.status === "portal_unavailable") {
+      setText("runStatus", data.message || "DBS portal unavailable (maintenance). Try later.");
+      return;
     }
 
-    await downloadBlobWithFilename(resp);
-    setStatus($("runStatus"), "Downloaded.");
-  } catch (e) {
-    setStatus($("runStatus"), String(e.message || e));
+    const link = $("singleDownload");
+    if (link && data.pdf_url) {
+      link.href = data.pdf_url;
+      link.classList.remove("hidden");
+      link.textContent = "Download PDF";
+    }
+    setText("runStatus", statusLabel(data.status));
+  } catch (err) {
+    setText("runStatus", err?.message || "Run failed.");
+  } finally {
+    setDisabled("btnRun", false);
   }
 });
 
-// ---- Bulk extract ----
+// -------------------------
+// Extract (bulk)
+// -------------------------
 function renderBulkTable(items) {
   const tbody = $("bulkTbody");
   tbody.innerHTML = "";
-  items.forEach((it, idx) => {
-    const i = idx + 1;
+  (items || []).forEach((it, idx) => {
     const tr = document.createElement("tr");
-    tr.dataset.row = String(i);
+    tr.dataset.row = String(idx + 1);
+
+    const conf = it.confidence || {};
+    const overall = conf.overall ?? "";
 
     tr.innerHTML = `
-      <td>${i}</td>
-      <td><input class="cell" data-k="certificate_number" value="${(it.certificate_number || "").replaceAll('"','&quot;')}"></td>
-      <td><input class="cell" data-k="surname" value="${(it.surname || "").replaceAll('"','&quot;')}"></td>
-      <td>
+      <td>${idx + 1}</td>
+      <td><input class="cell cert" value="${it.certificate_number || ""}"></td>
+      <td><input class="cell surname" value="${it.surname || ""}"></td>
+      <td class="dob">
         <div class="grid3">
-          <input class="cell" data-k="dob_day" placeholder="DD" value="${(it.dob_day || "").replaceAll('"','&quot;')}">
-          <input class="cell" data-k="dob_month" placeholder="MM" value="${(it.dob_month || "").replaceAll('"','&quot;')}">
-          <input class="cell" data-k="dob_year" placeholder="YYYY" value="${(it.dob_year || "").replaceAll('"','&quot;')}">
+          <input class="cell dd" value="${it.dob_day || ""}" placeholder="DD">
+          <input class="cell mm" value="${it.dob_month || ""}" placeholder="MM">
+          <input class="cell yy" value="${it.dob_year || ""}" placeholder="YYYY">
         </div>
       </td>
-      <td>
-        <div class="grid3">
-          <input class="cell" data-k="issue_day" placeholder="DD" value="${(it.issue_day || "").replaceAll('"','&quot;')}">
-          <input class="cell" data-k="issue_month" placeholder="MM" value="${(it.issue_month || "").replaceAll('"','&quot;')}">
-          <input class="cell" data-k="issue_year" placeholder="YYYY" value="${(it.issue_year || "").replaceAll('"','&quot;')}">
-        </div>
+      <td class="muted">
+        Cert ${Math.round(conf.certificate_number || 0)}% ·
+        Surname ${Math.round(conf.surname || 0)}% ·
+        DOB ${Math.round(conf.dob || 0)}% ·
+        Overall ${Math.round(overall || 0)}%
       </td>
-      <td><span class="pill">${Math.round(Number(it.verification_score || 0))}%</span></td>
+      <td class="statusCell"></td>
+      <td class="dlCell"></td>
     `;
     tbody.appendChild(tr);
   });
 }
 
-function collectBulkItems() {
-  const tbody = $("bulkTbody");
-  const rows = Array.from(tbody.querySelectorAll("tr"));
-  return rows.map((tr) => {
-    const obj = {};
-    const inputs = Array.from(tr.querySelectorAll("input.cell"));
-    for (const inp of inputs) {
-      const k = inp.dataset.k;
-      obj[k] = (inp.value || "").trim();
-    }
-    return obj;
-  });
-}
-
-$("btnExtractBulk").addEventListener("click", async () => {
-  const filesEl = $("files");
-  const fileList = filesEl.files ? Array.from(filesEl.files) : [];
-  if (fileList.length === 0) {
-    setStatus($("extractBulkStatus"), "Please choose files.");
+$("btnExtractBulk")?.addEventListener("click", async () => {
+  if (!bulkFiles.length) {
+    setText("extractBulkStatus", "Please add files first.");
     return;
   }
-  if (fileList.length > 20) {
-    setStatus($("extractBulkStatus"), "Max 20 files.");
-    return;
-  }
+  setText("extractBulkStatus", "Extracting…");
+  setDisabled("btnExtractBulk", true);
 
-  setStatus($("extractBulkStatus"), "Extracting…");
-  $("bulkResults").classList.add("hidden");
+  const fd = new FormData();
+  bulkFiles.slice(0, 20).forEach((f) => fd.append("files", f));
+
   try {
-    const fd = new FormData();
-    fileList.forEach((f) => fd.append("files", f));
     const resp = await fetch("/dbs/extract", { method: "POST", body: fd });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || "Extract failed.");
-    }
     const data = await resp.json();
-    const items = data.items || [];
-    renderBulkTable(items);
-    setStatus($("extractBulkStatus"), `Done. Review/edit ${items.length} rows.`);
-  } catch (e) {
-    setStatus($("extractBulkStatus"), String(e.message || e));
+    if (!resp.ok) throw new Error(data?.detail || "Bulk extraction failed");
+    renderBulkTable(data.items || []);
+    setText("extractBulkStatus", "Done.");
+  } catch (err) {
+    setText("extractBulkStatus", err?.message || "Bulk extraction failed.");
+  } finally {
+    setDisabled("btnExtractBulk", false);
   }
 });
 
-// ---- Bulk run ----
-function renderBulkResults(payload) {
-  const { zip_url, zip_name, results } = payload;
-  const zipLink = $("zipLink");
-  if (zip_url) {
-    zipLink.href = zip_url;
-    zipLink.textContent = `Download ZIP (${zip_name || "DBS_Checks.zip"})`;
-    zipLink.classList.remove("hidden");
-  } else {
-    zipLink.classList.add("hidden");
+// -------------------------
+// Run (bulk) + live updates via polling
+// -------------------------
+let pollTimer = null;
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
   }
-
-  const tbody = $("resultsTbody");
-  tbody.innerHTML = "";
-  (results || []).forEach((r) => {
-    const tr = document.createElement("tr");
-    const status = r.ok ? "✅" : "❌";
-    const dl = r.ok && r.pdf_url ? `<a class="btnLink" href="${r.pdf_url}">Download</a>` : "";
-    tr.innerHTML = `
-      <td>${r.row || ""}</td>
-      <td>${status}</td>
-      <td class="mono">${(r.filename || "").replaceAll("<","&lt;")}</td>
-      <td>${dl}</td>
-    `;
-    tbody.appendChild(tr);
-  });
-
-  $("bulkResults").classList.remove("hidden");
 }
 
-$("btnRunBulk").addEventListener("click", async () => {
-  const step1 = getStep1();
-  const items = collectBulkItems();
-  if (items.length === 0) {
-    setStatus($("runBulkStatus"), "No extracted rows.");
-    return;
+function collectBulkItems() {
+  const rows = Array.from(document.querySelectorAll("#bulkTbody tr"));
+  return rows.map((tr) => {
+    const cert = tr.querySelector("input.cert")?.value || "";
+    const surname = tr.querySelector("input.surname")?.value || "";
+    const dd = tr.querySelector("input.dd")?.value || "";
+    const mm = tr.querySelector("input.mm")?.value || "";
+    const yy = tr.querySelector("input.yy")?.value || "";
+    return {
+      certificate_number: cert.trim(),
+      surname: surname.trim(),
+      dob_day: dd.trim(),
+      dob_month: mm.trim(),
+      dob_year: yy.trim(),
+    };
+  });
+}
+
+function updateBulkUIFromStatus(data) {
+  const running = data.running || {};
+  const done = running.done || 0;
+  const total = running.total || 0;
+
+  setText("runBulkStatus", total ? `Running ${done}/${total}` : "");
+
+  const rows = data.rows || [];
+  rows.forEach((r, idx) => {
+    const tr = document.querySelector(`#bulkTbody tr[data-row="${idx + 1}"]`);
+    if (!tr) return;
+    const statusCell = tr.querySelector(".statusCell");
+    const dlCell = tr.querySelector(".dlCell");
+
+    statusCell.innerHTML = "";
+    statusCell.appendChild(buildBadge(r.status));
+
+    if (r.status === "running" || r.status === "queued") {
+      dlCell.innerHTML = "";
+      return;
+    }
+
+    if (r.status === "portal_unavailable") {
+      dlCell.innerHTML = `<span class="muted">No output</span>`;
+      return;
+    }
+
+    if (r.pdf_url) {
+      dlCell.innerHTML = `<a class="btnSmall" href="${r.pdf_url}">Download</a>`;
+    } else {
+      dlCell.innerHTML = `<span class="muted">No output</span>`;
+    }
+  });
+
+  const zipBtn = $("zipLink");
+  if (zipBtn) {
+    if (data.zip_ready && data.zip_url) {
+      zipBtn.href = data.zip_url;
+      zipBtn.classList.remove("hidden");
+      zipBtn.textContent = "Download ZIP";
+    } else {
+      zipBtn.classList.add("hidden");
+    }
   }
 
-  const download_mode = $("bulkDownloadMode").value || "zip";
-  const payload = {
-    ...step1,
-    items,
-    download_mode,
-  };
+  if (data.state === "done") {
+    stopPolling();
+    setDisabled("btnRunBulk", false);
+    setText("runBulkStatus", `Completed ${done}/${total}`);
+  }
+}
 
-  setStatus($("runBulkStatus"), "Running… (this can take a few minutes)");
+$("btnRunBulk")?.addEventListener("click", async () => {
+  stopPolling();
+  setText("runBulkStatus", "");
+  setDisabled("btnRunBulk", true);
+
+  const step1 = getStep1();
+  const items = collectBulkItems();
+
   try {
     const resp = await fetch("/dbs/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...step1, items }),
     });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail?.message || err.detail || "Run failed.");
-    }
     const data = await resp.json();
-    renderBulkResults(data);
-    setStatus($("runBulkStatus"), "Done.");
-    if (download_mode === "zip" && data.zip_url) {
-      // Auto-start single download (ZIP is safe)
-      window.location.href = data.zip_url;
-    }
-  } catch (e) {
-    setStatus($("runBulkStatus"), String(e.message || e));
+    if (!resp.ok) throw new Error(data?.detail || "Bulk run failed");
+
+    // init status UI
+    updateBulkUIFromStatus({ rows: data.rows || [], running: { done: 0, total: (data.rows || []).length }, state: "running" });
+
+    // poll status
+    pollTimer = setInterval(async () => {
+      try {
+        const r = await fetch(data.status_url);
+        const st = await r.json();
+        if (!r.ok) throw new Error(st?.detail || "Status failed");
+        updateBulkUIFromStatus(st);
+      } catch (e) {
+        // keep trying, but show minimal signal
+        setText("runBulkStatus", "Updating…");
+      }
+    }, 1000);
+  } catch (err) {
+    setText("runBulkStatus", err?.message || "Bulk run failed.");
+    setDisabled("btnRunBulk", false);
   }
 });
-
-// init
-switchMode("single");

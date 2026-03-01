@@ -43,3 +43,21 @@ input.cell{padding:8px 10px;border-radius:10px;}
 .btnLink:hover{border-color:#4c86ff;}
 
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;}
+
+
+.dropZone{
+  border:2px dashed #999;
+  padding:18px;
+  border-radius:12px;
+  text-align:center;
+  margin:10px 0;
+  background:#fafafa;
+}
+.dropZone.dragover{ background:#f0f7ff; border-color:#2b6cb0; }
+.hiddenFile{ display:none; }
+.badge{ display:inline-block; padding:4px 8px; border-radius:999px; font-size:12px; }
+.badge.running{ background:#eef2ff; }
+.badge.clear{ background:#e6fffa; }
+.badge.not_on_update_service{ background:#fffbea; }
+.badge.needs_review{ background:#fff5f5; }
+.badge.portal_unavailable{ background:#f3f4f6; }

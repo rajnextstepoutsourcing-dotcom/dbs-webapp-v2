@@ -8,6 +8,7 @@ import os
 import io
 import json
 import re
+import secrets
 import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
@@ -18,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Fil
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
+from starlette.responses import Response
 
 import fitz  # PyMuPDF
 import pdfplumber
@@ -35,6 +37,48 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 app = FastAPI(title="DBS Check")
 app.mount("/static", StaticFiles(directory=os.path.join(APP_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(APP_DIR, "templates"))
+
+# -------------------------
+# Lightweight session (cookie) for per-session run lock
+# -------------------------
+SID_COOKIE = "sid"
+
+
+def _new_sid() -> str:
+    # URL-safe random id
+    return secrets.token_urlsafe(18)
+
+
+@app.middleware("http")
+async def _session_middleware(request: Request, call_next):
+    _ensure_cleanup_task()
+
+    sid = request.cookies.get(SID_COOKIE)
+    if not sid:
+        sid = _new_sid()
+        request.state.sid = sid
+        response: Response = await call_next(request)
+        response.set_cookie(
+            SID_COOKIE,
+            sid,
+            httponly=True,
+            samesite="lax",
+            secure=False,
+            max_age=60 * 60 * 24 * 7,  # 7 days
+        )
+        return response
+
+    request.state.sid = sid
+    response: Response = await call_next(request)
+    return response
+
+
+def _sid_from(request: Request) -> str:
+    sid = getattr(request.state, "sid", None)
+    if sid:
+        return sid
+    return request.cookies.get(SID_COOKIE) or _new_sid()
+
 
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -114,12 +158,76 @@ def validate_cert_number(s: str) -> Optional[str]:
     return None
 
 
-def score_field(val: Optional[str]) -> int:
-    return 95 if val else 0
+def score_cert_number(val: str) -> int:
+    digits = re.sub(r"\D", "", val or "")
+    if not digits:
+        return 0
+    # Base score for plausible length
+    if 10 <= len(digits) <= 14:
+        base = 80
+    else:
+        return 30
+    # Extra points if it's already validated by our validator (currently length-based, but future-proof)
+    return min(100, base + (20 if validate_cert_number(digits) else 0))
+
+
+def score_surname(val: str, *, source: str = "") -> int:
+    s = (val or "").strip()
+    if not s:
+        return 0
+    # Allow letters, spaces and hyphens only
+    cleaned = re.sub(r"[^A-Za-z\-\s]", "", s).strip()
+    if not cleaned:
+        return 10
+    length = len(cleaned.replace(" ", ""))
+    if length < 2:
+        score = 35
+    elif length < 4:
+        score = 70
+    else:
+        score = 85
+    if cleaned != s:
+        score -= 10
+    # Minor adjustment based on extraction source (PDF text tends to be cleaner)
+    if (source or "").lower().startswith("pdf"):
+        score = min(100, score + 5)
+    return max(0, min(100, score))
+
+
+def score_dob(dd: str, mm: str, yyyy: str, *, source: str = "") -> int:
+    dd = (dd or "").strip()
+    mm = (mm or "").strip()
+    yyyy = (yyyy or "").strip()
+    if not (dd or mm or yyyy):
+        return 0
+    # Partial date
+    if not (dd and mm and yyyy):
+        return 45
+    try:
+        d = int(dd); m = int(mm); y = int(yyyy)
+        datetime.date(y, m, d)
+        score = 95
+        if (source or "").lower().startswith("pdf"):
+            score = min(100, score + 5)
+        return score
+    except Exception:
+        return 20
+
+
+def overall_confidence(cert_score: int, surname_score: int, dob_score: int) -> int:
+    scores = [s for s in [cert_score, surname_score, dob_score] if s > 0]
+    if not scores:
+        return 0
+    avg = sum(scores) / len(scores)
+    # Penalty if something is missing
+    missing = 3 - len(scores)
+    avg = avg - (missing * 8)
+    return max(0, min(100, int(round(avg))))
 
 
 # -------------------------
 # PDF/Text extraction
+
 # -------------------------
 def extract_text_from_pdf(pdf_bytes: bytes, max_pages: int = 2) -> str:
     try:
@@ -207,7 +315,7 @@ def pdf_to_images_bytes(pdf_bytes: bytes, max_pages: int = 1, dpi: int = 240) ->
 # -------------------------
 def extract_fields_from_text(text: str) -> Dict[str, Any]:
     t = normalize_ws(text)
-    out: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None, "issue_date": None}
+    out: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None}
 
     m = re.search(r"Certificate\s*Number[:\s]*([0-9\s]{8,20})", t, flags=re.IGNORECASE)
     if m:
@@ -227,17 +335,6 @@ def extract_fields_from_text(text: str) -> Dict[str, Any]:
         if parts:
             out["dob"] = {"dd": parts[0], "mm": parts[1], "yyyy": parts[2]}
 
-    # Issue Date ONLY (no Print Date)
-    m = re.search(
-        r"(Date\s*of\s*Issue|Issue\s*Date)[:\s]*([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4}|\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4})",
-        t,
-        flags=re.IGNORECASE,
-    )
-    if m:
-        parts = parse_uk_date_words(m.group(2)) or parse_ddmmyyyy(m.group(2))
-        if parts:
-            out["issue_date"] = {"dd": parts[0], "mm": parts[1], "yyyy": parts[2]}
-
     return out
 
 
@@ -255,7 +352,6 @@ Return STRICT JSON with this schema:
   "certificate_number": "string digits or empty",
   "surname": "string or empty",
   "dob": "DD MONTH YYYY or empty",
-  "issue_date": "DD MONTH YYYY or empty"
 }
 
 Rules:
@@ -288,7 +384,6 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
         certificate_number: str|None,
         surname: str|None,
         dob: {dd,mm,yyyy}|None,
-        issue_date: {dd,mm,yyyy}|None,
         _model: str,
       }
     """
@@ -322,10 +417,8 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
             return True
         cert_ok = bool(validate_cert_number(str(d.get("certificate_number", "") or "")))
         surname_ok = bool(normalize_ws(str(d.get("surname", "") or "")).strip())
-        dob_ok = bool(normalize_ws(str(d.get("dob", "") or "")).strip())
-        issue_ok = bool(normalize_ws(str(d.get("issue_date", "") or "")).strip())
-        # fallback if any of these are missing
-        return not (cert_ok and surname_ok and dob_ok and issue_ok)
+        dob_ok = bool(normalize_ws(str(d.get("dob", "") or "")).strip())        # fallback if any of these are missing
+        return not (cert_ok and surname_ok and dob_ok)
 
     if _is_missing(data):
         try:
@@ -339,7 +432,6 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
         "certificate_number": validate_cert_number(str(data.get("certificate_number", "") or "")),
         "surname": normalize_ws(str(data.get("surname", "") or "")).upper() or None,
         "dob": None,
-        "issue_date": None,
         "_model": model_used,
     }
 
@@ -351,15 +443,6 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
     )
     if dob_parts:
         out["dob"] = {"dd": dob_parts[0], "mm": dob_parts[1], "yyyy": dob_parts[2]}
-
-    issue_parts = (
-        parse_uk_date_words(str(data.get("issue_date", "") or ""))
-        or parse_ddmmyyyy(str(data.get("issue_date", "") or ""))
-        or parse_uk_date_words(str(data.get("date_of_issue", "") or ""))
-        or parse_ddmmyyyy(str(data.get("date_of_issue", "") or ""))
-    )
-    if issue_parts:
-        out["issue_date"] = {"dd": issue_parts[0], "mm": issue_parts[1], "yyyy": issue_parts[2]}
 
     return out
 
@@ -385,52 +468,124 @@ def health():
 
 
 # -------------------------
-# Job storage (ephemeral)
+# Job storage (ephemeral, Free-plan safe)
 # -------------------------
 import uuid
 import zipfile
 import time
 from zoneinfo import ZoneInfo
+from starlette.background import BackgroundTask
 
 JOBS_ROOT = Path("/tmp") / "dbs_jobs"
 JOBS_ROOT.mkdir(parents=True, exist_ok=True)
 
-# In-memory registry: job_id -> {"path": str, "created": float}
+# job_id -> metadata/state
 JOBS: Dict[str, Dict[str, Any]] = {}
 
-JOB_TTL_SECONDS = 60 * 60  # 1 hour
+# session_id -> active job_id (run lock: only 1 active job per session)
+ACTIVE_BY_SID: Dict[str, str] = {}
+
+# v2 spec: delete after 15 minutes inactivity (bulk and single)
+JOB_INACTIVITY_TTL_SECONDS = 15 * 60
+
+_CLEANUP_TASK_STARTED = False
 
 
-def _cleanup_jobs() -> None:
-    """Best-effort cleanup of old jobs (kept simple for Render)."""
-    now = time.time()
-    to_delete = []
+def _now() -> float:
+    return time.time()
+
+
+def _touch_job(job_id: str) -> None:
+    meta = JOBS.get(job_id)
+    if meta:
+        meta["last_access"] = _now()
+
+
+def _delete_job(job_id: str) -> None:
+    meta = JOBS.pop(job_id, None)
+    if not meta:
+        return
+    # release session lock if held
+    sid = meta.get("sid")
+    if sid and ACTIVE_BY_SID.get(sid) == job_id:
+        ACTIVE_BY_SID.pop(sid, None)
+
+    try:
+        job_path = Path(meta.get("path") or "")
+        if job_path.exists():
+            import shutil
+            shutil.rmtree(job_path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+
+
+def _release_lock(job_id: str) -> None:
+    meta = JOBS.get(job_id)
+    if not meta:
+        return
+    sid = meta.get("sid")
+    if sid and ACTIVE_BY_SID.get(sid) == job_id:
+        ACTIVE_BY_SID.pop(sid, None)
+def _cleanup_jobs_once() -> None:
+    now = _now()
     for jid, meta in list(JOBS.items()):
-        created = float(meta.get("created") or 0)
-        if now - created > JOB_TTL_SECONDS:
-            to_delete.append(jid)
-    for jid in to_delete:
+        last_access = float(meta.get("last_access") or meta.get("created") or 0)
+        mode = meta.get("mode") or ""
+        zip_downloaded = bool(meta.get("zip_downloaded"))
+        # Bulk: if zip downloaded -> delete immediately
+        if mode == "bulk" and zip_downloaded:
+            _delete_job(jid)
+            continue
+        # Otherwise: inactivity TTL
+        if now - last_access > JOB_INACTIVITY_TTL_SECONDS:
+            _delete_job(jid)
+
+
+async def _cleanup_loop() -> None:
+    while True:
         try:
-            job_path = Path(JOBS[jid]["path"])
-            if job_path.exists():
-                for _ in range(2):
-                    try:
-                        import shutil
-                        shutil.rmtree(job_path, ignore_errors=True)
-                        break
-                    except Exception:
-                        time.sleep(0.1)
+            _cleanup_jobs_once()
         except Exception:
             pass
-        JOBS.pop(jid, None)
+        await anyio.sleep(60)
 
 
-def _new_job_dir(prefix: str = "job") -> Tuple[str, Path]:
-    _cleanup_jobs()
+def _ensure_cleanup_task() -> None:
+    global _CLEANUP_TASK_STARTED
+    if _CLEANUP_TASK_STARTED:
+        return
+    _CLEANUP_TASK_STARTED = True
+    try:
+        import asyncio
+        asyncio.get_event_loop().create_task(_cleanup_loop())
+    except Exception:
+        # If event loop isn't ready, FastAPI startup will call again.
+        _CLEANUP_TASK_STARTED = False
+
+
+def _new_job_dir(*, prefix: str, sid: str, mode: str) -> Tuple[str, Path]:
+    _cleanup_jobs_once()
     job_id = str(uuid.uuid4())
     job_dir = JOBS_ROOT / f"{prefix}-{job_id}"
     job_dir.mkdir(parents=True, exist_ok=True)
-    JOBS[job_id] = {"path": str(job_dir), "created": time.time()}
+    JOBS[job_id] = {
+        "path": str(job_dir),
+        "created": _now(),
+        "last_access": _now(),
+        "sid": sid,
+        "mode": mode,  # "single" or "bulk"
+        "state": "running",
+        "checked_date": "",
+        "rows": [],          # bulk rows
+        "zip_name": "",
+        "zip_ready": False,
+        "zip_downloaded": False,
+        "message": "",
+    }
+    # Run lock
+    ACTIVE_BY_SID[sid] = job_id
     return job_id, job_dir
 
 
@@ -450,36 +605,22 @@ def _safe_filename(name: str, default: str) -> str:
     return name
 
 
-def _calc_date_score(dd: str, mm: str, yyyy: str) -> int:
-    dd = (dd or "").strip()
-    mm = (mm or "").strip()
-    yyyy = (yyyy or "").strip()
-    parts = [dd, mm, yyyy]
-    filled = sum(1 for p in parts if p)
-    if filled == 0:
-        return 0
-    if filled < 3:
-        return int(round((filled / 3) * 100))
-    # Basic validation
-    if not (dd.isdigit() and mm.isdigit() and yyyy.isdigit()):
-        return 60
-    d = int(dd)
-    m = int(mm)
-    y = int(yyyy)
-    if not (1 <= d <= 31 and 1 <= m <= 12 and 1900 <= y <= 2100):
-        return 70
-    return 100
+
+def _uk_checked_date() -> str:
+    # "Checked date" based on UK time.
+    dt = datetime.datetime.now(tz=ZoneInfo("Europe/London"))
+    return dt.strftime("%d.%m.%Y")
 
 
-def _verification_score(resp_item: Dict[str, Any]) -> int:
-    # Weighted simple score (neutral naming; no AI exposure)
-    cert = score_field(resp_item.get("certificate_number", ""))
-    sur = score_field(resp_item.get("surname", ""))
-    dob = _calc_date_score(resp_item.get("dob_day",""), resp_item.get("dob_month",""), resp_item.get("dob_year",""))
-    issue = _calc_date_score(resp_item.get("issue_day",""), resp_item.get("issue_month",""), resp_item.get("issue_year",""))
-    # weights: cert 30, sur 25, dob 25, issue 20
-    total = (cert*0.30) + (sur*0.25) + (dob*0.25) + (issue*0.20)
-    return int(round(total))
+def _safe_filename(name: str, default: str) -> str:
+    name = normalize_ws(name).strip()
+    if not name:
+        name = default
+    # Replace illegal filename chars (Windows + URL safety)
+    name = re.sub(r'[\\/:*?"<>|]+', "-", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
 
 
 # -------------------------
@@ -499,8 +640,9 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
         if len(content) > 25 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large. Please upload a PDF/image under 25MB.")
 
-        fields: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None, "issue_date": None}
-        source: Dict[str, str] = {"certificate_number": "", "surname": "", "dob": "", "issue_date": ""}
+        # v2: No Issue Date anywhere
+        fields: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None}
+        source: Dict[str, str] = {"certificate_number": "", "surname": "", "dob": ""}
 
         if filename.endswith(".pdf"):
             text = extract_text_from_pdf(content)
@@ -512,14 +654,11 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                     source["surname"] = "PDF text"
                 if fields.get("dob"):
                     source["dob"] = "PDF text"
-                if fields.get("issue_date"):
-                    source["issue_date"] = "PDF text"
 
             if (
                 not fields.get("certificate_number")
                 or not fields.get("surname")
                 or not fields.get("dob")
-                or not fields.get("issue_date")
             ):
                 try:
                     imgs = pdf_to_images_bytes(content, max_pages=1, dpi=240)
@@ -527,7 +666,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                     raise HTTPException(status_code=400, detail=str(e))
                 images = [(b, "image/png") for b in imgs]
                 vision = gemini_vision_extract_images(images)
-                for k in ["certificate_number", "surname", "dob", "issue_date"]:
+                for k in ["certificate_number", "surname", "dob"]:
                     if not fields.get(k) and vision.get(k):
                         fields[k] = vision.get(k)
                         # Do not mention AI; keep neutral wording.
@@ -540,37 +679,43 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 "certificate_number": vision.get("certificate_number"),
                 "surname": vision.get("surname"),
                 "dob": vision.get("dob"),
-                "issue_date": vision.get("issue_date"),
             }
-            for k in ["certificate_number", "surname", "dob", "issue_date"]:
+            for k in ["certificate_number", "surname", "dob"]:
                 if fields.get(k):
                     source[k] = "Image scan"
 
         dob = fields.get("dob") if isinstance(fields.get("dob"), dict) else {}
-        issue = fields.get("issue_date") if isinstance(fields.get("issue_date"), dict) else {}
+
+        cert_val = fields.get("certificate_number") or ""
+        surname_val = fields.get("surname") or ""
+        dob_dd = (dob.get("dd") or "")
+        dob_mm = (dob.get("mm") or "")
+        dob_yy = (dob.get("yyyy") or "")
+
+        cert_conf = score_cert_number(cert_val)
+        surname_conf = score_surname(surname_val, source=source.get("surname") or "")
+        dob_conf = score_dob(dob_dd, dob_mm, dob_yy, source=source.get("dob") or "")
+        overall = overall_confidence(cert_conf, surname_conf, dob_conf)
 
         resp_item = {
             "original_filename": file.filename or "",
-            "certificate_number": fields.get("certificate_number") or "",
-            "surname": fields.get("surname") or "",
-            "dob_day": (dob.get("dd") or ""),
-            "dob_month": (dob.get("mm") or ""),
-            "dob_year": (dob.get("yyyy") or ""),
-            "issue_day": (issue.get("dd") or ""),
-            "issue_month": (issue.get("mm") or ""),
-            "issue_year": (issue.get("yyyy") or ""),
+            "certificate_number": cert_val,
+            "surname": surname_val,
+            "dob_day": dob_dd,
+            "dob_month": dob_mm,
+            "dob_year": dob_yy,
             "confidence": {
-                "certificate_number": score_field(fields.get("certificate_number") or ""),
-                "surname": score_field(fields.get("surname") or ""),
-                "dob": _calc_date_score(dob.get("dd") or "", dob.get("mm") or "", dob.get("yyyy") or ""),
-                "issue_date": _calc_date_score(issue.get("dd") or "", issue.get("mm") or "", issue.get("yyyy") or ""),
+                "certificate_number": cert_conf,
+                "surname": surname_conf,
+                "dob": dob_conf,
+                "overall": overall,
             },
             "source": source,
         }
-        resp_item["verification_score"] = _verification_score(resp_item)
         items.append(resp_item)
 
     return JSONResponse({"items": items})
+
 
 
 # -------------------------
@@ -584,11 +729,188 @@ async def dbs_download(job_id: str, name: str):
     meta = JOBS.get(job_id)
     if not meta:
         raise HTTPException(status_code=404, detail="Download expired or not found.")
+    _touch_job(job_id)
+
     job_dir = Path(meta["path"])
     file_path = job_dir / name
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found.")
-    return FileResponse(path=str(file_path), filename=name, media_type="application/octet-stream")
+
+    mode = meta.get("mode") or ""
+
+    # Cleanup rules (v2):
+    # - Single: delete after download
+    # - Bulk: if ZIP downloaded -> delete immediately; otherwise delete after 15 mins inactivity
+    background = None
+    if mode == "single":
+        background = BackgroundTask(_delete_job, job_id)
+    elif mode == "bulk" and name.lower().endswith(".zip"):
+        meta["zip_downloaded"] = True
+        background = BackgroundTask(_delete_job, job_id)
+
+    return FileResponse(
+        path=str(file_path),
+        filename=name,
+        media_type="application/octet-stream",
+        background=background,
+    )
+
+
+
+@app.get("/dbs/status/{job_id}")
+async def dbs_status(job_id: str):
+    meta = JOBS.get(job_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="Job expired or not found.")
+    _touch_job(job_id)
+    rows = meta.get("rows") or []
+    done = sum(1 for r in rows if (r.get("status") in ["clear", "not_on_update_service", "needs_review", "portal_unavailable"]))
+    total = len(rows) if rows else (1 if meta.get("mode") == "single" else 0)
+    payload = {
+        "job_id": job_id,
+        "mode": meta.get("mode"),
+        "state": meta.get("state"),
+        "checked_date": meta.get("checked_date") or "",
+        "running": {"done": done, "total": total},
+        "rows": rows,
+        "zip_ready": bool(meta.get("zip_ready")),
+        "zip_name": meta.get("zip_name") or "",
+        "zip_url": (f"/dbs/download/{job_id}/{meta.get('zip_name')}" if meta.get("zip_ready") and meta.get("zip_name") else ""),
+        "message": meta.get("message") or "",
+    }
+    return JSONResponse(payload)
+
+
+async def _process_bulk_job(
+    *,
+    job_id: str,
+    job_dir: Path,
+    organisation_name: str,
+    employee_forename: str,
+    employee_surname: str,
+    items: List[Dict[str, Any]],
+):
+    meta = JOBS.get(job_id)
+    if not meta:
+        return
+
+    checked_date = _uk_checked_date()
+    meta["checked_date"] = checked_date
+
+    pdf_names: List[str] = []
+
+    for i, it in enumerate(items[:20], start=1):
+        meta = JOBS.get(job_id)
+        if not meta:
+            return
+
+        row = meta["rows"][i - 1]
+        row["status"] = "running"
+        row["error"] = ""
+        _touch_job(job_id)
+
+        certificate_number = (it.get("certificate_number") or "").strip()
+        surname_extracted = (it.get("surname") or it.get("surname_extracted") or "").strip()
+        surname_user = (it.get("surname_user") or "").strip()
+        applicant_surname = (surname_extracted or surname_user).strip()
+
+        dob_day = str(it.get("dob_day") or "").strip()
+        dob_month = str(it.get("dob_month") or "").strip()
+        dob_year = str(it.get("dob_year") or "").strip()
+
+        cert = validate_cert_number(certificate_number)
+
+        if not cert:
+            row["status"] = "needs_review"
+            row["error"] = "Invalid certificate number."
+            continue
+        if not applicant_surname:
+            row["status"] = "needs_review"
+            row["error"] = "Applicant surname is missing."
+            continue
+        if not (dob_day and dob_month and dob_year):
+            row["status"] = "needs_review"
+            row["error"] = "DOB is incomplete."
+            continue
+
+        # Per-candidate subdir to avoid collisions within job
+        cand_dir = job_dir / f"c{i:02d}"
+        cand_dir.mkdir(parents=True, exist_ok=True)
+
+        result = await anyio.to_thread.run_sync(
+            lambda: run_dbs_check_and_download_pdf(
+                organisation_name=organisation_name,
+                employee_forename=employee_forename,
+                employee_surname=employee_surname,
+                certificate_number=cert,
+                applicant_surname=applicant_surname,
+                dob_day=str(dob_day).zfill(2),
+                dob_month=str(dob_month).zfill(2),
+                dob_year=str(dob_year),
+                out_dir=cand_dir,
+                headless=True,
+            )
+        )
+
+        status = (result.get("status") or "needs_review").strip()
+        if status not in ["clear", "not_on_update_service", "needs_review", "portal_unavailable"]:
+            status = "needs_review"
+
+        row["status"] = status
+
+        if status == "portal_unavailable":
+            row["error"] = "DBS portal unavailable (maintenance). Try later."
+            continue
+
+        out_surname = _safe_filename(applicant_surname.upper(), f"SURNAME{i}")
+
+        if status == "clear":
+            final_name = f"{out_surname} - DBS Check - {checked_date}.pdf"
+        elif status == "not_on_update_service":
+            final_name = f"{out_surname} - Not on Update Service - {checked_date}.pdf"
+        else:
+            final_name = f"{out_surname} - Needs Review - {checked_date}.pdf"
+
+        final_name = _safe_filename(final_name, f"DBS-Result-{i}.pdf")
+
+        pdf_path = result.get("pdf_path") or ""
+        if not pdf_path or not os.path.exists(pdf_path):
+            row["status"] = "needs_review"
+            row["error"] = result.get("error") or "Runner did not produce a PDF."
+            continue
+
+        # Move into job root with final filename
+        final_path = job_dir / final_name
+        try:
+            if final_path.exists():
+                final_path.unlink()
+            os.replace(pdf_path, str(final_path))
+        except Exception:
+            final_path = Path(pdf_path)
+            final_name = final_path.name
+
+        pdf_names.append(final_name)
+        row["filename"] = final_name
+        row["pdf_url"] = f"/dbs/download/{job_id}/{final_name}"
+
+    # Create ZIP when all rows complete (exclude portal unavailable)
+    meta = JOBS.get(job_id)
+    if not meta:
+        return
+
+    zip_name = _safe_filename(f"DBS_Checks_{checked_date}.zip", "DBS_Checks.zip")
+    zip_path = job_dir / zip_name
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for pdfn in pdf_names:
+            fp = job_dir / pdfn
+            if fp.exists():
+                zf.write(fp, arcname=pdfn)
+
+    meta["zip_name"] = zip_name
+    meta["zip_ready"] = True
+    meta["state"] = "done"
+    _release_lock(job_id)
+    _touch_job(job_id)
 
 
 @app.post("/dbs/run")
@@ -604,6 +926,15 @@ async def dbs_run(request: Request):
         form = await request.form()
         payload = dict(form)
 
+    sid = _sid_from(request)
+
+    # Run lock: only 1 active running job per session
+    existing = ACTIVE_BY_SID.get(sid)
+    if existing:
+        ex_meta = JOBS.get(existing)
+        if ex_meta and (ex_meta.get("state") == "running"):
+            raise HTTPException(status_code=409, detail="A job is already running for this session. Please wait for it to complete.")
+
     organisation_name = (payload.get("organisation_name") or payload.get("org_name") or payload.get("organisation") or "").strip()
     employee_forename = (payload.get("employee_forename") or payload.get("forename") or "").strip()
     employee_surname  = (payload.get("employee_surname")  or payload.get("surname_user") or payload.get("surname") or "").strip()
@@ -611,123 +942,39 @@ async def dbs_run(request: Request):
     if not (organisation_name and employee_forename and employee_surname):
         raise HTTPException(status_code=400, detail="Organisation/Forename/Surname (Step 1) is incomplete.")
 
-    # Bulk mode: items list
     items = payload.get("items")
     if isinstance(items, list) and len(items) > 0:
-        download_mode = (payload.get("download_mode") or "zip").lower()  # "zip" or "individual"
-        checked_date = _uk_checked_date()
-        job_id, job_dir = _new_job_dir(prefix="dbs")
+        # Bulk mode: start job immediately and stream progress via /dbs/status polling
+        job_id, job_dir = _new_job_dir(prefix="dbs", sid=sid, mode="bulk")
+        meta = JOBS[job_id]
+        meta["rows"] = [
+            {"row": i + 1, "status": "queued", "filename": "", "pdf_url": "", "error": ""} for i in range(min(20, len(items)))
+        ]
+        meta["state"] = "running"
 
-        results: List[Dict[str, Any]] = []
-        pdf_names: List[str] = []
-
-        for i, it in enumerate(items[:20], start=1):
-            certificate_number = (it.get("certificate_number") or "").strip()
-            surname_extracted = (it.get("surname") or it.get("surname_extracted") or it.get("surname_dbs") or "").strip()
-            surname_user = (it.get("surname_user") or "").strip()
-            applicant_surname = (surname_extracted or surname_user).strip()
-
-            dob_day = str(it.get("dob_day") or "").strip()
-            dob_month = str(it.get("dob_month") or "").strip()
-            dob_year = str(it.get("dob_year") or "").strip()
-
-            cert = validate_cert_number(certificate_number)
-            if not cert:
-                results.append({"ok": False, "row": i, "error": "Invalid certificate number.", "filename": ""})
-                continue
-            if not applicant_surname:
-                results.append({"ok": False, "row": i, "error": "Applicant surname is missing.", "filename": ""})
-                continue
-            if not (dob_day and dob_month and dob_year):
-                results.append({"ok": False, "row": i, "error": "DOB is incomplete.", "filename": ""})
-                continue
-
-            out_surname = _safe_filename(applicant_surname.upper(), f"SURNAME{i}")
-            final_name = f"{out_surname} - DBS Check - {checked_date}.pdf"
-            final_name = _safe_filename(final_name, f"DBS-Check-{i}.pdf")
-
-            # Per-candidate subdir to avoid collisions within job
-            cand_dir = job_dir / f"c{i:02d}"
-            cand_dir.mkdir(parents=True, exist_ok=True)
-
-            result = await anyio.to_thread.run_sync(
-                lambda: run_dbs_check_and_download_pdf(
-                    organisation_name=organisation_name,
-                    employee_forename=employee_forename,
-                    employee_surname=employee_surname,
-                    certificate_number=cert,
-                    applicant_surname=applicant_surname,
-                    dob_day=str(dob_day).zfill(2),
-                    dob_month=str(dob_month).zfill(2),
-                    dob_year=str(dob_year),
-                    out_dir=cand_dir,
-                    headless=True,
-                )
+        import asyncio
+        asyncio.get_event_loop().create_task(
+            _process_bulk_job(
+                job_id=job_id,
+                job_dir=job_dir,
+                organisation_name=organisation_name,
+                employee_forename=employee_forename,
+                employee_surname=employee_surname,
+                items=items,
             )
-
-            if not result.get("ok"):
-                results.append({
-                    "ok": False,
-                    "row": i,
-                    "error": result.get("error"),
-                    "filename": final_name,
-                })
-                continue
-
-            pdf_path = result.get("pdf_path")
-            if not pdf_path or not os.path.exists(pdf_path):
-                results.append({
-                    "ok": False,
-                    "row": i,
-                    "error": "Runner succeeded but PDF was not found.",
-                    "filename": final_name,
-                })
-                continue
-
-            # Move into job root with final filename
-            final_path = job_dir / final_name
-            try:
-                if final_path.exists():
-                    final_path.unlink()
-                os.replace(pdf_path, str(final_path))
-            except Exception:
-                # fallback to original name
-                final_path = Path(pdf_path)
-                final_name = final_path.name
-
-            pdf_names.append(final_name)
-            results.append({
-                "ok": True,
-                "row": i,
-                "filename": final_name,
-                "pdf_url": f"/dbs/download/{job_id}/{final_name}",
-            })
-
-        zip_url = ""
-        zip_name = ""
-        if download_mode == "zip":
-            zip_name = _safe_filename(f"DBS_Checks_{checked_date}.zip", "DBS_Checks.zip")
-            zip_path = job_dir / zip_name
-            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for pdfn in pdf_names:
-                    fp = job_dir / pdfn
-                    if fp.exists():
-                        zf.write(fp, arcname=pdfn)
-            zip_url = f"/dbs/download/{job_id}/{zip_name}"
+        )
 
         return JSONResponse({
             "job_id": job_id,
-            "checked_date": checked_date,
-            "download_mode": download_mode,
-            "zip_url": zip_url,
-            "zip_name": zip_name,
-            "results": results,
+            "mode": "bulk",
+            "status_url": f"/dbs/status/{job_id}",
+            "rows": meta["rows"],
         })
 
-    # Single mode (existing)
+    # Single mode
     certificate_number = (payload.get("certificate_number") or "").strip()
     surname_user = (payload.get("surname_user") or payload.get("surname") or "").strip()
-    surname_extracted = (payload.get("surname_extracted") or payload.get("surname_dbs") or "").strip()
+    surname_extracted = (payload.get("surname_extracted") or "").strip()
     applicant_surname = (surname_extracted or surname_user).strip()
 
     dob_day = (payload.get("dob_day") or payload.get("dob_dd") or "").strip()
@@ -742,11 +989,10 @@ async def dbs_run(request: Request):
     if not (dob_day and dob_month and dob_year):
         raise HTTPException(status_code=400, detail="DOB is incomplete.")
 
+    job_id, job_dir = _new_job_dir(prefix="dbs", sid=sid, mode="single")
     checked_date = _uk_checked_date()
-    out_surname = _safe_filename(applicant_surname.upper(), "SURNAME")
-    final_name = _safe_filename(f"{out_surname} - DBS Check - {checked_date}.pdf", "DBS-Check.pdf")
+    JOBS[job_id]["checked_date"] = checked_date
 
-    job_id, job_dir = _new_job_dir(prefix="dbs-single")
     result = await anyio.to_thread.run_sync(
         lambda: run_dbs_check_and_download_pdf(
             organisation_name=organisation_name,
@@ -762,18 +1008,38 @@ async def dbs_run(request: Request):
         )
     )
 
-    if not result.get("ok"):
-        detail = {
-            "message": "DBS portal run failed.",
-            "error": result.get("error"),
-            "error_png": result.get("error_png"),
-            "trace_path": result.get("trace_path"),
-        }
-        raise HTTPException(status_code=500, detail=detail)
+    status = (result.get("status") or "needs_review").strip()
+    if status not in ["clear", "not_on_update_service", "needs_review", "portal_unavailable"]:
+        status = "needs_review"
 
-    pdf_path = result.get("pdf_path")
+    if status == "portal_unavailable":
+        # no PDF generated
+        JOBS[job_id]["state"] = "done"
+        JOBS[job_id]["message"] = "DBS portal unavailable (maintenance). Try later."
+        _release_lock(job_id)
+        _delete_job(job_id)
+        return JSONResponse({
+            "ok": True,
+            "status": "portal_unavailable",
+            "message": "DBS portal unavailable (maintenance). Try later.",
+        })
+
+    out_surname = _safe_filename(applicant_surname.upper(), "SURNAME")
+
+    if status == "clear":
+        final_name = f"{out_surname} - DBS Check - {checked_date}.pdf"
+    elif status == "not_on_update_service":
+        final_name = f"{out_surname} - Not on Update Service - {checked_date}.pdf"
+    else:
+        final_name = f"{out_surname} - Needs Review - {checked_date}.pdf"
+
+    final_name = _safe_filename(final_name, "DBS-Result.pdf")
+
+    pdf_path = result.get("pdf_path") or ""
     if not pdf_path or not os.path.exists(pdf_path):
-        raise HTTPException(status_code=500, detail="Runner succeeded but PDF was not found on disk.")
+        JOBS[job_id]["state"] = "done"
+        _release_lock(job_id)
+        raise HTTPException(status_code=500, detail="Runner succeeded but PDF was not found.")
 
     final_path = job_dir / final_name
     try:
@@ -781,7 +1047,17 @@ async def dbs_run(request: Request):
             final_path.unlink()
         os.replace(pdf_path, str(final_path))
     except Exception:
-        final_path = Path(pdf_path)
-        final_name = final_path.name
+        final_name = Path(pdf_path).name
 
-    return FileResponse(path=str(final_path), filename=final_name, media_type="application/pdf")
+    JOBS[job_id]["state"] = "done"
+    _release_lock(job_id)
+
+    return JSONResponse({
+        "ok": True,
+        "status": status,
+        "job_id": job_id,
+        "checked_date": checked_date,
+        "filename": final_name,
+        "pdf_url": f"/dbs/download/{job_id}/{final_name}",
+    })
+

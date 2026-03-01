@@ -8,6 +8,11 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError,
 
 CRSC_CHECK = "https://secure.crbonline.gov.uk/crsc/check"
 
+STATUS_CLEAR = "clear"
+STATUS_NOT_ON_UPDATE = "not_on_update_service"
+STATUS_NEEDS_REVIEW = "needs_review"
+STATUS_PORTAL_UNAVAILABLE = "portal_unavailable"
+
 
 def _tag() -> str:
     return time.strftime("%Y%m%d-%H%M%S")
@@ -124,6 +129,105 @@ def _fill_dob_step2(page, dd: str, mm: str, yyyy: str) -> None:
     raise RuntimeError("Could not fill DOB on Step 2 (selectors did not match).")
 
 
+
+def _looks_like_portal_unavailable(err: Exception) -> bool:
+    msg = str(err) if err else ""
+    msg_l = msg.lower()
+    needles = [
+        "err_empty_response",
+        "err_connection_reset",
+        "err_timed_out",
+        "err_connection_refused",
+        "name or service not known",
+        "dns",
+        "timed out",
+        "timeout",
+        "http 502",
+        "http 503",
+        "http 504",
+        "server returned",
+        "failed to load",
+    ]
+    return any(n in msg_l for n in needles)
+
+
+def _has_any(page, selectors) -> bool:
+    for sel in selectors:
+        try:
+            if page.locator(sel).first.count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _classify_result_page(page) -> str:
+    # Structure-first classification:
+    # - Look for success / mismatch panels by container classes/ids (not keywords-only).
+    success_panels = [
+        "div.alert-success",
+        "div.panel-success",
+        "div.success",
+        "#success",
+        ".successPanel",
+        ".matchPanel",
+        ".result-success",
+    ]
+    mismatch_panels = [
+        "div.alert-danger",
+        "div.panel-danger",
+        "div.error",
+        "#mismatch",
+        ".mismatchPanel",
+        ".noMatchPanel",
+        ".result-danger",
+        ".result-error",
+    ]
+
+    has_success = _has_any(page, success_panels)
+    has_mismatch = _has_any(page, mismatch_panels)
+
+    if has_success and not has_mismatch:
+        return STATUS_CLEAR
+    if has_mismatch and not has_success:
+        return STATUS_NOT_ON_UPDATE
+    # If we have a recognizable "result" area but can't classify confidently, mark Needs Review
+    resultish = _has_any(page, ["#content", "main", "div.container", "form"])
+    if resultish:
+        return STATUS_NEEDS_REVIEW
+    return STATUS_NEEDS_REVIEW
+
+
+def _inject_needs_review_notice(page) -> None:
+    # Ensure the PDF contains a clear notice for support/admin.
+    try:
+        page.evaluate(
+            """
+() => {
+  const existing = document.getElementById('dbs-v2-needs-review');
+  if (existing) return;
+  const bar = document.createElement('div');
+  bar.id = 'dbs-v2-needs-review';
+  bar.textContent = 'Layout changed – inform administrator/developer.';
+  bar.style.position = 'fixed';
+  bar.style.top = '0';
+  bar.style.left = '0';
+  bar.style.right = '0';
+  bar.style.zIndex = '999999';
+  bar.style.padding = '12px 16px';
+  bar.style.fontSize = '14px';
+  bar.style.fontFamily = 'Arial, sans-serif';
+  bar.style.borderBottom = '2px solid #000';
+  bar.style.background = '#fff3cd';
+  bar.style.color = '#000';
+  document.body.style.paddingTop = '56px';
+  document.body.prepend(bar);
+}
+"""
+        )
+    except Exception:
+        pass
+
 def run_dbs_check_and_download_pdf(
     *,
     organisation_name: str,
@@ -218,21 +322,33 @@ def run_dbs_check_and_download_pdf(
             # If server replies "Invalid request." then fail with a clear message
             if "Invalid request" in page.content():
                 page.screenshot(path=str(error_png), full_page=True)
-                raise RuntimeError("DBS returned 'Invalid request' (anti-bot/rate-limit). Wait 5–10 minutes and retry with headless=False.")
+                raise RuntimeError("DBS returned 'Invalid request' (portal unavailable / rate-limit).")
 
-            # Save result
+            # Classify result (structure-based) and apply output rules
             page.wait_for_load_state("domcontentloaded", timeout=30000)
-            page.wait_for_timeout(1200)
+            page.wait_for_timeout(900)
+
+            status = _classify_result_page(page)
+
+            if status == STATUS_NEEDS_REVIEW:
+                _inject_needs_review_notice(page)
+
+            if status == STATUS_PORTAL_UNAVAILABLE:
+                return {"ok": True, "status": STATUS_PORTAL_UNAVAILABLE, "pdf_path": "", "trace_path": str(trace_path)}
+
+            # Save PDF output for Clear / Not on Update / Needs Review
+            page.wait_for_timeout(500)
             page.pdf(path=str(pdf_path), print_background=True)
 
-            return {"ok": True, "pdf_path": str(pdf_path), "trace_path": str(trace_path)}
+            return {"ok": True, "status": status, "pdf_path": str(pdf_path) if status != STATUS_PORTAL_UNAVAILABLE else "", "trace_path": str(trace_path)}
 
         except (PWTimeoutError, Exception) as e:
             try:
                 page.screenshot(path=str(error_png), full_page=True)
             except Exception:
                 pass
-            return {"ok": False, "error": str(e), "error_png": str(error_png), "trace_path": str(trace_path)}
+            status = STATUS_PORTAL_UNAVAILABLE if _looks_like_portal_unavailable(e) else STATUS_NEEDS_REVIEW
+            return {"ok": True if status == STATUS_PORTAL_UNAVAILABLE else False, "status": status, "error": str(e), "error_png": str(error_png), "trace_path": str(trace_path), "pdf_path": ""}
         finally:
             try:
                 context.tracing.stop(path=str(trace_path))
