@@ -12,6 +12,19 @@ function setDisabled(id, disabled) {
   el.disabled = !!disabled;
 }
 
+
+function downloadBlob(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "download";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 5000);
+}
+
+
 function fillField(id, value) {
   const el = $(id);
   if (!el) return;
@@ -68,6 +81,7 @@ function ensureModeUI() {
 $("modeSingle")?.addEventListener("change", ensureModeUI);
 $("modeBulk")?.addEventListener("change", ensureModeUI);
 ensureModeUI();
+updateBulkCount();
 
 // -------------------------
 // Bulk file handling (append + drag/drop, max 20)
@@ -257,6 +271,11 @@ function renderBulkTable(items) {
   (items || []).forEach((it, idx) => {
     const tr = document.createElement("tr");
     tr.dataset.row = String(idx + 1);
+    tr.dataset.originalFilename = it.original_filename || "";
+    tr.dataset.forename = it.forename || "";
+    tr.dataset.issueDay = it.issue_day || "";
+    tr.dataset.issueMonth = it.issue_month || "";
+    tr.dataset.issueYear = it.issue_year || "";
 
     const conf = it.confidence || {};
     const overall = conf.overall ?? "";
@@ -298,6 +317,8 @@ document.addEventListener("click", (e) => {
     const numCell = row.querySelector("td:nth-child(2)");
     if (numCell) numCell.textContent = String(i + 1);
   });
+  lastExtractedItems = collectBulkItems();
+  updateBulkCount();
 });
 }
 
@@ -310,7 +331,7 @@ $("btnExtractBulk")?.addEventListener("click", async () => {
   setDisabled("btnExtractBulk", true);
 
   const fd = new FormData();
-  bulkFiles.slice(0, 20).forEach((f) => fd.append("files", f));
+  bulkFiles.slice(0, 100).forEach((f) => fd.append("files", f));
 
   try {
     const resp = await fetch("/dbs/extract", { method: "POST", body: fd });
@@ -318,6 +339,7 @@ $("btnExtractBulk")?.addEventListener("click", async () => {
     if (!resp.ok) throw new Error(data?.detail || "Bulk extraction failed");
     lastExtractedItems = data.items || [];
     renderBulkTable(lastExtractedItems);
+    updateBulkCount();
     setText("extractBulkStatus", data.notice ? data.notice : "Done.");
     setText("zipNotice", "");
   } catch (err) {
@@ -326,6 +348,59 @@ $("btnExtractBulk")?.addEventListener("click", async () => {
     setDisabled("btnExtractBulk", false);
   }
 });
+
+
+async function exportExtract(fmt){
+  if(!lastExtractedItems?.length){
+    setText("extractBulkStatus","Nothing to export. Please Extract first.");
+    return;
+  }
+  const resp = await fetch("/dbs/export/extract", {
+    method:"POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({format: fmt, items: lastExtractedItems})
+  });
+  if(!resp.ok){
+    const data = await resp.json().catch(()=>({}));
+    throw new Error(data?.detail || "Export failed");
+  }
+  const blob = await resp.blob();
+  downloadBlob(blob, fmt==="csv" ? "extract.csv" : "extract.xlsx");
+}
+
+async function exportResults(fmt){
+  // We store last job payload in window._lastJobPayload from poll updates
+  const payload = window._lastJobPayload;
+  if(!payload?.rows?.length){
+    setText("runBulkStatus","Nothing to export. Please Run first.");
+    return;
+  }
+  const resp = await fetch("/dbs/export/results", {
+    method:"POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({format: fmt, checked_date: payload.checked_date || "", rows: payload.rows || []})
+  });
+  if(!resp.ok){
+    const data = await resp.json().catch(()=>({}));
+    throw new Error(data?.detail || "Export failed");
+  }
+  const blob = await resp.blob();
+  downloadBlob(blob, fmt==="csv" ? "results.csv" : "results.xlsx");
+}
+
+$("btnDlExtractXlsx")?.addEventListener("click", async ()=>{
+  try{ await exportExtract("xlsx"); } catch(e){ setText("extractBulkStatus", e?.message || "Export failed."); }
+});
+$("btnDlExtractCsv")?.addEventListener("click", async ()=>{
+  try{ await exportExtract("csv"); } catch(e){ setText("extractBulkStatus", e?.message || "Export failed."); }
+});
+$("btnDlResultsXlsx")?.addEventListener("click", async ()=>{
+  try{ await exportResults("xlsx"); } catch(e){ setText("runBulkStatus", e?.message || "Export failed."); }
+});
+$("btnDlResultsCsv")?.addEventListener("click", async ()=>{
+  try{ await exportResults("csv"); } catch(e){ setText("runBulkStatus", e?.message || "Export failed."); }
+});
+
 
 // -------------------------
 // Run (bulk) + live updates via polling

@@ -93,14 +93,18 @@
 
       <!-- Bulk -->
       <div id="bulkWrap" class="hidden">
-        <div id="dropZone" class="dropZone">Drag & drop up to 20 files (PDF/JPG/PNG/CSV/XLSX)</div>
+        <div id="dropZone" class="dropZone">Drag & drop up to 100 files (PDF/JPG/PNG/WEBP/CSV/XLSX/DOCX)</div>
+        <div class="muted small">Supported formats: PDF (text/scanned), JPG/JPEG, PNG, WEBP, CSV, XLSX, DOCX (best effort). Limits: 100 files, 100 rows per run.</div>
         <div id="bulkChips" class="chips"></div>
-        <input id="files" type="file" accept="application/pdf,image/*,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple class="hiddenFile" />
+        <input id="files" type="file" accept="application/pdf,image/*,.webp,.csv,.xlsx,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple class="hiddenFile" />
         <div class="row btnRow"><button id="btnAddMore" type="button">Add more files</button>
           <button id="btnClearAll" type="button" class="danger">Clear all</button></div>
         <div class="row">
           <button id="btnExtractBulk">Extract all</button>
+          <button id="btnDlExtractXlsx" type="button" class="ghost">Download Extract Excel (Optional)</button>
+          <button id="btnDlExtractCsv" type="button" class="ghost">Download Extract CSV (Optional)</button>
           <span id="bulkCount" class="pill"></span>
+          <span id="bulkRowCount" class="pill"></span>
           <span id="extractBulkStatus" class="muted"></span>
         </div>
 
@@ -128,6 +132,8 @@
 
         <div class="row">
           <button id="btnRunBulk" class="primary">Run All Checks</button>
+          <button id="btnDlResultsXlsx" type="button" class="ghost">Download Results Excel (Optional)</button>
+          <button id="btnDlResultsCsv" type="button" class="ghost">Download Results CSV (Optional)</button>
           <span id="runBulkStatus" class="muted"></span>
         </div>
         <h3>Downloads</h3>

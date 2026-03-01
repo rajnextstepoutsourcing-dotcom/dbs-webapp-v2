@@ -700,7 +700,12 @@ def parse_xlsx_rows(content: bytes) -> List[Dict[str, Any]]:
 def _rows_from_dict_iter(iterable, cols_norm_to_original: Dict[str, str]) -> List[Dict[str, Any]]:
     # Column mapping (case-insensitive + common variants)
     cert_keys = ["certificatenumber", "certno", "certnumber", "certificate", "cert"]
+    forename_keys = ["forename", "firstname", "first_name", "givenname", "given_name"]
     surname_keys = ["surname", "lastname", "last_name"]
+    issue_single_keys = ["issuedate", "dateofissue", "issue_date", "date_issued"]
+    issue_dd_keys = ["issueday", "issue_day"]
+    issue_mm_keys = ["issuemonth", "issue_month"]
+    issue_yy_keys = ["issueyear", "issue_year"]
     dob_single_keys = ["dob", "dateofbirth", "dateofbirthddmmyyyy"]
     dd_keys = ["dobday", "day", "dd"]
     mm_keys = ["dobmonth", "month", "mm"]
@@ -713,7 +718,12 @@ def _rows_from_dict_iter(iterable, cols_norm_to_original: Dict[str, str]) -> Lis
         return None
 
     cert_col = first_present(cert_keys)
+    forename_col = first_present([_norm_col(k) for k in forename_keys])
     surname_col = first_present([_norm_col(k) for k in surname_keys])
+    issue_col = first_present(issue_single_keys)
+    issue_dd_col = first_present(issue_dd_keys)
+    issue_mm_col = first_present(issue_mm_keys)
+    issue_yy_col = first_present(issue_yy_keys)
     dob_col = first_present(dob_single_keys)
     dd_col = first_present(dd_keys)
     mm_col = first_present(mm_keys)
@@ -753,14 +763,79 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
     items: List[Dict[str, Any]] = []
     total_rows_cap = 100
 
-    # Hard limit: 20 uploaded files (as per spec)
-    for file in files[:20]:
+    # Hard limit: 100 uploaded files (Premium)
+    for file in files[:100]:
         content = await file.read()
         fname = (file.filename or "")
         filename = fname.lower()
 
         if len(content) > 25 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large. Please upload files under 25MB.")
+
+        
+        # DOCX (best effort text extraction)
+        if filename.endswith(".docx"):
+            try:
+                from docx import Document
+            except Exception:
+                raise HTTPException(status_code=400, detail="python-docx is not installed (required for .docx).")
+            try:
+                doc = Document(io.BytesIO(content))
+                text = "\n".join([p.text for p in doc.paragraphs if (p.text or "").strip()])
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"DOCX '{fname}' could not be read: {str(e)}")
+            fields = extract_fields_from_text(text)
+            # no vision fallback for docx
+            dob = fields.get("dob") if isinstance(fields.get("dob"), dict) else {}
+            issue = fields.get("issue_date") if isinstance(fields.get("issue_date"), dict) else {}
+            cert_val = fields.get("certificate_number") or ""
+            surname_val = fields.get("surname") or ""
+            dob_dd = (dob.get("dd") or "")
+            dob_mm = (dob.get("mm") or "")
+            dob_yy = (dob.get("yyyy") or "")
+            issue_dd = (issue.get("dd") or "")
+            issue_mm = (issue.get("mm") or "")
+            issue_yy = (issue.get("yyyy") or "")
+            source = {"certificate_number": "DOCX text" if cert_val else "", "surname": "DOCX text" if surname_val else "", "dob": "DOCX text" if (dob_dd and dob_mm and dob_yy) else "", "issue_date": "DOCX text" if (issue_dd and issue_mm and issue_yy) else ""}
+            cert_conf = score_cert_number(cert_val)
+            surname_conf = score_surname(surname_val, source=source.get("surname") or "")
+            dob_conf = score_dob(dob_dd, dob_mm, dob_yy, source=source.get("dob") or "")
+            overall = overall_confidence(cert_conf, surname_conf, dob_conf)
+            items.append({
+                "original_filename": fname,
+                "forename": "",
+                "certificate_number": cert_val,
+                "surname": surname_val,
+                "dob_day": dob_dd,
+                "dob_month": dob_mm,
+                "dob_year": dob_yy,
+                "issue_day": issue_dd,
+                "issue_month": issue_mm,
+                "issue_year": issue_yy,
+                "confidence": {
+                    "certificate_number": cert_conf,
+                    "surname": surname_conf,
+                    "dob": dob_conf,
+                    "overall": overall,
+                    "issue_date": score_dob(issue_dd, issue_mm, issue_yy, source=source.get("issue_date") or "") if (issue_dd or issue_mm or issue_yy) else 0,
+                },
+                "source": source,
+            })
+            if len(items) >= total_rows_cap:
+                break
+            continue
+
+        # WEBP → convert to PNG for vision
+        if filename.endswith(".webp"):
+            try:
+                from PIL import Image
+                im = Image.open(io.BytesIO(content)).convert("RGB")
+                buf = io.BytesIO()
+                im.save(buf, format="PNG")
+                content = buf.getvalue()
+                filename = fname.lower().replace(".webp", ".png")
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"WEBP '{fname}' could not be processed: {str(e)}")
 
         # If spreadsheet: expand into rows (details already present)
         if filename.endswith(".csv") or filename.endswith(".xlsx"):
@@ -775,13 +850,17 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
             for r_idx, r in enumerate(rows, start=2):  # 2 = header is row 1
                 if len(items) >= total_rows_cap:
                     break
+                forename_val = (r.get("forename") or "").strip()
                 cert_val = (r.get("certificate_number") or "").strip()
                 surname_val = (r.get("surname") or "").strip()
                 dob_dd = str(r.get("dob_day") or "").strip()
                 dob_mm = str(r.get("dob_month") or "").strip()
                 dob_yy = str(r.get("dob_year") or "").strip()
+                issue_dd = str(r.get("issue_day") or "").strip()
+                issue_mm = str(r.get("issue_month") or "").strip()
+                issue_yy = str(r.get("issue_year") or "").strip()
 
-                source = {"certificate_number": "Spreadsheet", "surname": "Spreadsheet", "dob": "Spreadsheet"}
+                source = {"certificate_number": "Spreadsheet", "surname": "Spreadsheet", "dob": "Spreadsheet", "issue_date": "Spreadsheet", "forename": "Spreadsheet"}
 
                 cert_conf = score_cert_number(cert_val)
                 surname_conf = score_surname(surname_val, source="Spreadsheet")
@@ -790,16 +869,21 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
 
                 items.append({
                     "original_filename": f"{fname} (Row {r_idx})",
+                    "forename": forename_val,
                     "certificate_number": cert_val,
                     "surname": surname_val,
                     "dob_day": dob_dd,
                     "dob_month": dob_mm,
                     "dob_year": dob_yy,
+                    "issue_day": issue_dd,
+                    "issue_month": issue_mm,
+                    "issue_year": issue_yy,
                     "confidence": {
                         "certificate_number": cert_conf,
                         "surname": surname_conf,
                         "dob": dob_conf,
                         "overall": overall,
+                        "issue_date": score_dob(issue_dd, issue_mm, issue_yy, source="Spreadsheet") if (issue_dd or issue_mm or issue_yy) else 0,
                     },
                     "source": source,
                 })
@@ -809,9 +893,9 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
             continue
 
         # Otherwise: treat as PDF/image (extract)
-        # v2: No Issue Date anywhere
-        fields: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None}
-        source: Dict[str, str] = {"certificate_number": "", "surname": "", "dob": ""}
+        # Premium v2: Issue Date is extracted best-effort but hidden in UI (export only)
+        fields: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None, "issue_date": None}
+        source: Dict[str, str] = {"certificate_number": "", "surname": "", "dob": "", "issue_date": ""}
 
         if filename.endswith(".pdf"):
             text = extract_text_from_pdf(content)
@@ -823,6 +907,8 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                     source["surname"] = "PDF text"
                 if fields.get("dob"):
                     source["dob"] = "PDF text"
+                if fields.get("issue_date"):
+                    source["issue_date"] = "PDF text"
 
             if (not fields.get("certificate_number") or not fields.get("surname") or not fields.get("dob")):
                 try:
@@ -831,7 +917,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                     raise HTTPException(status_code=400, detail=str(e))
                 images = [(b, "image/png") for b in imgs]
                 vision = gemini_vision_extract_images(images)
-                for k in ["certificate_number", "surname", "dob"]:
+                for k in ["certificate_number", "surname", "dob", "issue_date"]:
                     if not fields.get(k) and vision.get(k):
                         fields[k] = vision.get(k)
                         source[k] = "Image scan"
@@ -843,18 +929,23 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 "certificate_number": vision.get("certificate_number"),
                 "surname": vision.get("surname"),
                 "dob": vision.get("dob"),
+                "issue_date": vision.get("issue_date"),
             }
-            for k in ["certificate_number", "surname", "dob"]:
+            for k in ["certificate_number", "surname", "dob", "issue_date"]:
                 if fields.get(k):
                     source[k] = "Image scan"
 
         dob = fields.get("dob") if isinstance(fields.get("dob"), dict) else {}
+        issue = fields.get("issue_date") if isinstance(fields.get("issue_date"), dict) else {}
 
         cert_val = fields.get("certificate_number") or ""
         surname_val = fields.get("surname") or ""
         dob_dd = (dob.get("dd") or "")
         dob_mm = (dob.get("mm") or "")
         dob_yy = (dob.get("yyyy") or "")
+        issue_dd = (issue.get("dd") or "")
+        issue_mm = (issue.get("mm") or "")
+        issue_yy = (issue.get("yyyy") or "")
 
         cert_conf = score_cert_number(cert_val)
         surname_conf = score_surname(surname_val, source=source.get("surname") or "")
@@ -863,16 +954,21 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
 
         items.append({
             "original_filename": fname,
+            "forename": "",
             "certificate_number": cert_val,
             "surname": surname_val,
             "dob_day": dob_dd,
             "dob_month": dob_mm,
             "dob_year": dob_yy,
+            "issue_day": issue_dd,
+            "issue_month": issue_mm,
+            "issue_year": issue_yy,
             "confidence": {
                 "certificate_number": cert_conf,
                 "surname": surname_conf,
                 "dob": dob_conf,
                 "overall": overall,
+                        "issue_date": score_dob(issue_dd, issue_mm, issue_yy, source="Spreadsheet") if (issue_dd or issue_mm or issue_yy) else 0,
             },
             "source": source,
         })
@@ -885,6 +981,112 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
         return JSONResponse({"items": items, "notice": "Row limit reached (100). Extra rows were skipped."})
 
     return JSONResponse({"items": items})
+
+
+# -------------------------
+# Optional exports (no extra API usage)
+# -------------------------
+def _dmy(dd: str, mm: str, yy: str) -> str:
+    dd = str(dd or "").strip()
+    mm = str(mm or "").strip()
+    yy = str(yy or "").strip()
+    if dd and mm and yy:
+        return f"{dd.zfill(2)}/{mm.zfill(2)}/{yy}"
+    return ""
+
+def _map_update_service(status: str) -> str:
+    s = (status or "").strip().lower()
+    if s == "clear":
+        return "YES"
+    if s == "not on update service":
+        return "NO"
+    if s in ("needs review", "portal unavailable", "running", "error", "pending"):
+        return "UNKNOWN"
+    return "UNKNOWN"
+
+def _export_rows_extract(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for it in (items or []):
+        out.append({
+            "Forename": (it.get("forename") or "").strip(),
+            "Surname": (it.get("surname") or "").strip(),
+            "Certificate Number": (it.get("certificate_number") or "").strip(),
+            "DOB": _dmy(it.get("dob_day"), it.get("dob_month"), it.get("dob_year")),
+            "Issue Date": _dmy(it.get("issue_day"), it.get("issue_month"), it.get("issue_year")),
+            "PDF Filename": (it.get("original_filename") or "").strip(),
+            "Notes": "",
+        })
+    return out
+
+def _export_rows_results(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    checked_date = (payload.get("checked_date") or "").strip()
+    rows = payload.get("rows") or []
+    out = []
+    for r in rows:
+        status = (r.get("status") or "").strip()
+        out.append({
+            "Forename": (r.get("forename") or "").strip(),
+            "Surname": (r.get("surname") or "").strip(),
+            "Certificate Number": (r.get("certificate_number") or "").strip(),
+            "DOB": _dmy(r.get("dob_day"), r.get("dob_month"), r.get("dob_year")),
+            "Issue Date": _dmy(r.get("issue_day"), r.get("issue_month"), r.get("issue_year")),
+            "Status": status,
+            "Update Service": _map_update_service(status),
+            "Checked Date": checked_date,
+            "PDF Filename": (r.get("pdf_filename") or "").strip(),
+            "Notes": (r.get("error") or r.get("notes") or "").strip(),
+        })
+    return out
+
+def _csv_bytes(rows: List[Dict[str, Any]], columns: List[str]) -> bytes:
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        w.writerow({c: (r.get(c) if r.get(c) is not None else "") for c in columns})
+    return buf.getvalue().encode("utf-8-sig")
+
+def _xlsx_bytes(rows: List[Dict[str, Any]], columns: List[str]) -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(columns)
+    for r in rows:
+        ws.append([r.get(c, "") for c in columns])
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+@app.post("/dbs/export/extract")
+async def export_extract(request: Request):
+    data = await request.json()
+    fmt = (data.get("format") or "xlsx").lower()
+    items = data.get("items") or []
+    rows = _export_rows_extract(items)
+    if fmt == "csv":
+        columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","PDF Filename","Notes"]
+        b = _csv_bytes(rows, columns)
+        return Response(content=b, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=extract.csv"})
+    else:
+        columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","PDF Filename","Notes"]
+        b = _xlsx_bytes(rows, columns)
+        return Response(content=b, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": "attachment; filename=extract.xlsx"})
+
+@app.post("/dbs/export/results")
+async def export_results(request: Request):
+    data = await request.json()
+    fmt = (data.get("format") or "xlsx").lower()
+    rows = _export_rows_results(data)
+    columns = ["Forename","Surname","Certificate Number","DOB","Issue Date","Status","Update Service","Checked Date","PDF Filename","Notes"]
+    if fmt == "csv":
+        b = _csv_bytes(rows, columns)
+        return Response(content=b, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=results.csv"})
+    else:
+        b = _xlsx_bytes(rows, columns)
+        return Response(content=b, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": "attachment; filename=results.xlsx"})
+
 
 # -------------------------
 # Run DBS (single returns PDF; bulk returns job + links/zip)
@@ -1058,6 +1260,7 @@ async def _process_bulk_job(
             final_name = final_path.name
 
         pdf_names.append(final_name)
+        row["pdf_filename"] = final_name
         row["filename"] = final_name
         row["pdf_url"] = f"/dbs/download/{job_id}/{final_name}"
 
@@ -1123,9 +1326,27 @@ async def dbs_run(request: Request):
         # Bulk mode: start job immediately and stream progress via /dbs/status polling
         job_id, job_dir = _new_job_dir(prefix="dbs", sid=sid, mode="bulk")
         meta = JOBS[job_id]
-        meta["rows"] = [
-            {"row": i + 1, "status": "queued", "filename": "", "pdf_url": "", "error": ""} for i in range(min(100, len(items)))
-        ]
+        meta["rows"] = []
+        for i in range(min(100, len(items))):
+            it = items[i] if isinstance(items[i], dict) else {}
+            meta["rows"].append({
+                "row": i + 1,
+                "status": "queued",
+                "certificate_number": (it.get("certificate_number") or ""),
+                "surname": (it.get("surname") or ""),
+                "forename": (it.get("forename") or ""),
+                "dob_day": (it.get("dob_day") or ""),
+                "dob_month": (it.get("dob_month") or ""),
+                "dob_year": (it.get("dob_year") or ""),
+                "issue_day": (it.get("issue_day") or ""),
+                "issue_month": (it.get("issue_month") or ""),
+                "issue_year": (it.get("issue_year") or ""),
+                "original_filename": (it.get("original_filename") or ""),
+                "pdf_filename": "",
+                "pdf_url": "",
+                "error": "",
+            })
+
         meta["state"] = "running"
 
         import asyncio
