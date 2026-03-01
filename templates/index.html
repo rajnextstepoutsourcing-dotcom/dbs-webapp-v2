@@ -111,27 +111,11 @@
         <div class="divider"></div>
 
         <h3>Extracted list (editable)</h3>
-<div class="tableWrap">
-          <table id="bulkTable">
-            <thead>
-              <tr>
-                <th>Remove</th>
-                <th>#</th>
-                <th>Source</th>
-                <th>Certificate No</th>
-                <th>Surname</th>
-                <th>DOB (DD/MM/YYYY)</th>
-                <th>Confidence</th>
-                <th>Status</th>
-                <th>Download</th>
-              </tr>
-            </thead>
-            <tbody id="bulkTbody"></tbody>
-          </table>
-        </div>
+<div id="bulkList" class="bulkList"></div>
 
         <div class="row">
           <button id="btnRunBulk" class="primary">Run All Checks</button>
+          <a id="btnDlZip" class="btnLink hidden" href="#" download>Download All PDFs (ZIP)</a>
           <button id="btnDlResultsXlsx" type="button" class="ghost">Download Results Excel (Optional)</button>
           <button id="btnDlResultsCsv" type="button" class="ghost">Download Results CSV (Optional)</button>
           <span id="runBulkStatus" class="muted"></span>

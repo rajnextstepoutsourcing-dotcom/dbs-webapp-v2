@@ -51,9 +51,23 @@ def extract_text_from_pdf(pdf_bytes: bytes, max_pages: int = 2) -> str:
 
 
 def extract_fields_from_text(text: str) -> Dict[str, Any]:
-    # v2: Only Certificate Number, Surname, DOB (no Issue Date)
+    """Extract fields from plain text (PDF text layer / DOCX text).
+
+    Fields:
+      - certificate_number (digits)
+      - surname (upper)
+      - forename (upper, best-effort)
+      - dob: {dd, mm, yyyy}
+      - issue_date: {dd, mm, yyyy} (Date of Issue)
+    """
     text = text or ""
-    out: Dict[str, Any] = {"certificate_number": None, "surname": None, "dob": None, "issue_date": None}
+    out: Dict[str, Any] = {
+        "certificate_number": None,
+        "surname": None,
+        "forename": None,
+        "dob": None,
+        "issue_date": None,
+    }
 
     # Certificate Number
     cert_line = _extract_after_label(text, "Certificate Number")
@@ -73,10 +87,35 @@ def extract_fields_from_text(text: str) -> Dict[str, Any]:
     if surname:
         out["surname"] = surname
 
+    # Forename(s) (best effort)
+    forename = (
+        _extract_after_label(text, "Forename(s)")
+        or _extract_after_label(text, "Forenames")
+        or _extract_after_label(text, "First name")
+        or _extract_after_label(text, "First Name")
+        or ""
+    )
+    # Remove obvious trailing label bleed if OCR merged lines
+    forename = re.split(r"\b(Surname|Date of Birth|DOB|Certificate Number|Date of Issue|Issue Date)\b", forename, flags=re.IGNORECASE)[0]
+    forename = re.sub(r"[^A-Za-z\-\s]", "", forename).strip().upper()
+    if forename:
+        out["forename"] = forename
+
     # DOB
     dob_line = _extract_after_label(text, "Date of Birth") or _extract_after_label(text, "DOB")
     dd, mm, yyyy = _parse_dmy(dob_line)
     if dd and mm and yyyy:
         out["dob"] = {"dd": dd, "mm": mm, "yyyy": yyyy}
+
+    # Issue Date
+    issue_line = (
+        _extract_after_label(text, "Date of Issue")
+        or _extract_after_label(text, "Issue Date")
+        or _extract_after_label(text, "Issued on")
+        or ""
+    )
+    idd, imm, iyyyy = _parse_dmy(issue_line)
+    if idd and imm and iyyyy:
+        out["issue_date"] = {"dd": idd, "mm": imm, "yyyy": iyyyy}
 
     return out

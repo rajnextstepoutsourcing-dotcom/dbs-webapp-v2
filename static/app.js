@@ -24,7 +24,7 @@ function updateBulkCount() {
   // Optional: update rows-ready counter if present
   const rowEl = document.getElementById("bulkRowsCount");
   if (rowEl) {
-    const rows = document.querySelectorAll("#bulkTbody tr").length;
+    const rows = document.querySelectorAll("#bulkList .bulkRow").length;
     rowEl.textContent = `${rows}/100 rows ready`;
   }
 }
@@ -154,8 +154,8 @@ $("btnClearAll")?.addEventListener("click", () => {
   lastExtractedItems = [];
   renderChips();
   updateBulkCount();
-  const tbody = $("bulkTbody");
-  if (tbody) tbody.innerHTML = "";
+  const list = $("bulkList");
+  if (list) list.innerHTML = "";
   const rtb = $("resultsTbody");
   if (rtb) rtb.innerHTML = "";
   setText("extractBulkStatus", "");
@@ -277,61 +277,92 @@ $("btnRun")?.addEventListener("click", async () => {
 // Extract (bulk)
 // -------------------------
 function renderBulkTable(items) {
-  const tbody = $("bulkTbody");
-  tbody.innerHTML = "";
+  const list = $("bulkList");
+  if (!list) return;
+  list.innerHTML = "";
+
   (items || []).forEach((it, idx) => {
-    const tr = document.createElement("tr");
-    tr.dataset.row = String(idx + 1);
-    tr.dataset.originalFilename = it.original_filename || "";
-    tr.dataset.forename = it.forename || "";
-    tr.dataset.issueDay = it.issue_day || "";
-    tr.dataset.issueMonth = it.issue_month || "";
-    tr.dataset.issueYear = it.issue_year || "";
+    const row = document.createElement("div");
+    row.className = "bulkRow";
+    row.dataset.row = String(idx + 1);
+    row.dataset.originalFilename = it.original_filename || "";
+    row.dataset.forename = it.forename || "";
+    row.dataset.issueDay = it.issue_day || "";
+    row.dataset.issueMonth = it.issue_month || "";
+    row.dataset.issueYear = it.issue_year || "";
 
     const conf = it.confidence || {};
     const overall = conf.overall ?? "";
 
-    tr.innerHTML = `
-      <td><button type="button" class="btnTiny danger btnRemoveRow" data-idx="${idx}">Remove</button></td>
-      <td>${idx + 1}</td>
-      <td class="muted">${escapeHtml(it.original_filename || "")}</td>
-      <td><input class="cell cert" value="${it.certificate_number || ""}"></td>
-      <td><input class="cell surname" value="${it.surname || ""}"></td>
-      <td class="dob">
-        <div class="grid3">
-          <input class="cell dd" value="${it.dob_day || ""}" placeholder="DD">
-          <input class="cell mm" value="${it.dob_month || ""}" placeholder="MM">
-          <input class="cell yy" value="${it.dob_year || ""}" placeholder="YYYY">
+    row.innerHTML = `
+      <div class="bulkRowTop">
+        <div class="bulkRowLeft">
+          <button type="button" class="btnTiny danger btnRemoveRow" data-idx="${idx}">Remove</button>
+          <div class="bulkIndex">#${idx + 1}</div>
         </div>
-      </td>
-      <td class="muted">
-        Cert ${Math.round(conf.certificate_number || 0)}% ·
-        Surname ${Math.round(conf.surname || 0)}% ·
-        DOB ${Math.round(conf.dob || 0)}% ·
-        Overall ${Math.round(overall || 0)}%
-      </td>
-      <td class="statusCell"></td>
-      <td class="dlCell"></td>
+
+        <div class="bulkFields">
+          <div class="fieldBlock">
+            <div class="fieldLabel">Source</div>
+            <div class="bulkSource">${escapeHtml(it.original_filename || "")}</div>
+          </div>
+
+          <div class="fieldBlock">
+            <div class="fieldLabel">Certificate No</div>
+            <input class="cell cert" value="${it.certificate_number || ""}">
+            <div class="fieldHint">Confidence: ${Math.round(conf.certificate_number || 0)}%</div>
+          </div>
+
+          <div class="fieldBlock">
+            <div class="fieldLabel">Surname</div>
+            <input class="cell surname" value="${it.surname || ""}">
+            <div class="fieldHint">Confidence: ${Math.round(conf.surname || 0)}%</div>
+          </div>
+
+          <div class="fieldBlock">
+            <div class="fieldLabel">DOB</div>
+            <div class="fieldRow">
+              <input class="cell dd" value="${it.dob_day || ""}" placeholder="DD">
+              <input class="cell mm" value="${it.dob_month || ""}" placeholder="MM">
+              <input class="cell yy" value="${it.dob_year || ""}" placeholder="YYYY">
+            </div>
+            <div class="fieldHint">Confidence: ${Math.round(conf.dob || 0)}%</div>
+          </div>
+        </div>
+
+        <div class="bulkActions">
+          <div class="statusWrap"><span class="statusCell"></span></div>
+          <div class="dlWrap"><span class="dlCell muted">—</span></div>
+        </div>
+      </div>
+
+      <div class="bulkMeta">
+        <div class="confLine">Overall confidence: ${Math.round(overall || 0)}%</div>
+      </div>
     `;
-    tbody.appendChild(tr);
+    list.appendChild(row);
   });
 
-// Remove row in extracted table
+  updateBulkCount();
+}
+
+// Remove row in extracted list (cards)
 document.addEventListener("click", (e) => {
   const btn = e.target.closest?.(".btnRemoveRow");
   if (!btn) return;
-  const tr = btn.closest("tr");
-  if (tr) tr.remove();
+  const row = btn.closest(".bulkRow");
+  if (row) row.remove();
+
   // re-number rows
-  Array.from(document.querySelectorAll("#bulkTbody tr")).forEach((row, i) => {
-    row.dataset.row = String(i + 1);
-    const numCell = row.querySelector("td:nth-child(2)");
-    if (numCell) numCell.textContent = String(i + 1);
+  Array.from(document.querySelectorAll("#bulkList .bulkRow")).forEach((r, i) => {
+    r.dataset.row = String(i + 1);
+    const idxEl = r.querySelector(".bulkIndex");
+    if (idxEl) idxEl.textContent = `#${i + 1}`;
   });
+
   lastExtractedItems = collectBulkItems();
   updateBulkCount();
 });
-}
 
 $("btnExtractBulk")?.addEventListener("click", async () => {
   if (!bulkFiles.length) {
@@ -426,14 +457,19 @@ function stopPolling() {
 }
 
 function collectBulkItems() {
-  const rows = Array.from(document.querySelectorAll("#bulkTbody tr"));
-  return rows.map((tr) => {
-    const cert = tr.querySelector("input.cert")?.value || "";
-    const surname = tr.querySelector("input.surname")?.value || "";
-    const dd = tr.querySelector("input.dd")?.value || "";
-    const mm = tr.querySelector("input.mm")?.value || "";
-    const yy = tr.querySelector("input.yy")?.value || "";
+  const rows = Array.from(document.querySelectorAll("#bulkList .bulkRow"));
+  return rows.map((row) => {
+    const cert = row.querySelector("input.cert")?.value || "";
+    const surname = row.querySelector("input.surname")?.value || "";
+    const dd = row.querySelector("input.dd")?.value || "";
+    const mm = row.querySelector("input.mm")?.value || "";
+    const yy = row.querySelector("input.yy")?.value || "";
     return {
+      original_filename: row.dataset.originalFilename || "",
+      forename: row.dataset.forename || "",
+      issue_day: row.dataset.issueDay || "",
+      issue_month: row.dataset.issueMonth || "",
+      issue_year: row.dataset.issueYear || "",
       certificate_number: cert.trim(),
       surname: surname.trim(),
       dob_day: dd.trim(),
@@ -452,7 +488,7 @@ function updateBulkUIFromStatus(data) {
 
   const rows = data.rows || [];
   rows.forEach((r, idx) => {
-    const tr = document.querySelector(`#bulkTbody tr[data-row="${idx + 1}"]`);
+    const tr = document.querySelector(`#bulkList .bulkRow[data-row="${idx + 1}"]`);
     if (!tr) return;
     const statusCell = tr.querySelector(".statusCell");
     const dlCell = tr.querySelector(".dlCell");
@@ -482,13 +518,13 @@ function updateBulkUIFromStatus(data) {
     }
   });
 
-  const zipBtn = $("zipLink");
+  const zipBtn = $("btnDlZip") || $("zipLink");
   if ($("zipNotice")) setText("zipNotice", data.message || "");
   if (zipBtn) {
     if (data.zip_ready && data.zip_url) {
       zipBtn.href = data.zip_url;
       zipBtn.classList.remove("hidden");
-      zipBtn.textContent = "Download ZIP";
+      zipBtn.textContent = "Download All PDFs (ZIP)";
     } else {
       zipBtn.classList.add("hidden");
     }

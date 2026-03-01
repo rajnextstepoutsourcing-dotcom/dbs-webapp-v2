@@ -343,21 +343,24 @@ def extract_fields_from_text(text: str) -> Dict[str, Any]:
 # Gemini Vision extraction (FAST -> STRONG fallback)
 # -------------------------
 VISION_PROMPT = """You are extracting ONLY these fields from a UK DBS Enhanced Certificate (page 1):
-1) Certificate Number (digits)
+1) Certificate Number (digits only)
 2) Applicant Surname (value next to label 'Surname')
-3) Date of Birth (label 'Date of Birth')
-4) Date of Issue (label 'Date of Issue' or 'Issue Date') — DO NOT use Print Date / Date Printed.
+3) Applicant Forename(s) (value next to label 'Forename(s)' or 'Forenames')
+4) Date of Birth (label 'Date of Birth')
+5) Date of Issue (label 'Date of Issue' or 'Issue Date') — DO NOT use Print Date / Date Printed.
 
 Return STRICT JSON with this schema:
 {
   "certificate_number": "string digits or empty",
   "surname": "string or empty",
+  "forename": "string or empty",
   "dob": "DD MONTH YYYY or empty",
+  "issue_date": "DD MONTH YYYY or empty"
 }
 
 Rules:
 - If a field is not visible, return empty string for that field.
-- Certificate number MUST be digits only.
+- Certificate number MUST be digits only (no spaces).
 - Do not guess.
 """
 
@@ -432,7 +435,9 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
     out: Dict[str, Any] = {
         "certificate_number": validate_cert_number(str(data.get("certificate_number", "") or "")),
         "surname": normalize_ws(str(data.get("surname", "") or "")).upper() or None,
+        "forename": normalize_ws(str(data.get("forename", "") or "")).upper() or None,
         "dob": None,
+        "issue_date": None,
         "_model": model_used,
     }
 
@@ -444,6 +449,17 @@ def gemini_vision_extract_images(images: List[Tuple[bytes, str]]) -> Dict[str, A
     )
     if dob_parts:
         out["dob"] = {"dd": dob_parts[0], "mm": dob_parts[1], "yyyy": dob_parts[2]}
+
+    issue_parts = (
+        parse_uk_date_words(str(data.get("issue_date", "") or ""))
+        or parse_ddmmyyyy(str(data.get("issue_date", "") or ""))
+        or parse_uk_date_words(str(data.get("date_of_issue", "") or ""))
+        or parse_ddmmyyyy(str(data.get("date_of_issue", "") or ""))
+        or parse_uk_date_words(str(data.get("issued_on", "") or ""))
+        or parse_ddmmyyyy(str(data.get("issued_on", "") or ""))
+    )
+    if issue_parts:
+        out["issue_date"] = {"dd": issue_parts[0], "mm": issue_parts[1], "yyyy": issue_parts[2]}
 
     return out
 
@@ -803,7 +819,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
             overall = overall_confidence(cert_conf, surname_conf, dob_conf)
             items.append({
                 "original_filename": fname,
-                "forename": "",
+                "forename": (fields.get("forename") or ""),
                 "certificate_number": cert_val,
                 "surname": surname_val,
                 "dob_day": dob_dd,
@@ -917,7 +933,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                     raise HTTPException(status_code=400, detail=str(e))
                 images = [(b, "image/png") for b in imgs]
                 vision = gemini_vision_extract_images(images)
-                for k in ["certificate_number", "surname", "dob", "issue_date"]:
+                for k in ["certificate_number", "surname", "forename", "dob", "issue_date"]:
                     if not fields.get(k) and vision.get(k):
                         fields[k] = vision.get(k)
                         source[k] = "Image scan"
@@ -928,6 +944,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
             fields = {
                 "certificate_number": vision.get("certificate_number"),
                 "surname": vision.get("surname"),
+                "forename": vision.get("forename"),
                 "dob": vision.get("dob"),
                 "issue_date": vision.get("issue_date"),
             }
@@ -954,7 +971,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
 
         items.append({
             "original_filename": fname,
-            "forename": "",
+            "forename": (fields.get("forename") or ""),
             "certificate_number": cert_val,
             "surname": surname_val,
             "dob_day": dob_dd,
