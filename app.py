@@ -226,6 +226,11 @@ def overall_confidence(cert_score: int, surname_score: int, dob_score: int) -> i
     return max(0, min(100, int(round(avg))))
 
 
+# NOTE: The product no longer surfaces an "overall" confidence score in the UI.
+# We keep this helper only for backward compatibility, but responses should
+# include per-field confidence only.
+
+
 # -------------------------
 # PDF/Text extraction
 
@@ -871,7 +876,7 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
             cert_conf = score_cert_number(cert_val)
             surname_conf = score_surname(surname_val, source=source.get("surname") or "")
             dob_conf = score_dob(dob_dd, dob_mm, dob_yy, source=source.get("dob") or "")
-            overall = overall_confidence(cert_conf, surname_conf, dob_conf)
+            issue_conf = score_dob(issue_dd, issue_mm, issue_yy, source=source.get("issue_date") or "") if (issue_dd or issue_mm or issue_yy) else 0
             items.append({
                 "original_filename": fname,
                 "forename": (fields.get("forename") or ""),
@@ -935,7 +940,6 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 cert_conf = score_cert_number(cert_val)
                 surname_conf = score_surname(surname_val, source="Spreadsheet")
                 dob_conf = score_dob(dob_dd, dob_mm, dob_yy, source="Spreadsheet")
-                overall = overall_confidence(cert_conf, surname_conf, dob_conf)
 
                 items.append({
                     "original_filename": f"{fname} (Row {r_idx})",
@@ -952,7 +956,6 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                         "certificate_number": cert_conf,
                         "surname": surname_conf,
                         "dob": dob_conf,
-                        "overall": overall,
                         "issue_date": score_dob(issue_dd, issue_mm, issue_yy, source="Spreadsheet") if (issue_dd or issue_mm or issue_yy) else 0,
                     },
                     "source": source,
@@ -1040,8 +1043,9 @@ async def dbs_extract(files: List[UploadFile] = File(...)):
                 "certificate_number": cert_conf,
                 "surname": surname_conf,
                 "dob": dob_conf,
-                "overall": overall,
-                        "issue_date": score_dob(issue_dd, issue_mm, issue_yy, source="Spreadsheet") if (issue_dd or issue_mm or issue_yy) else 0,
+                # We intentionally do NOT return an overall confidence score.
+                # The UI shows per-field confidence only.
+                "issue_date": score_dob(issue_dd, issue_mm, issue_yy, source="Spreadsheet") if (issue_dd or issue_mm or issue_yy) else 0,
             },
             "source": source,
         })
