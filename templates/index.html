@@ -4,11 +4,26 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DBS Check</title>
+  <script>
+    (function(){
+      try{
+        var t = localStorage.getItem('dbs_theme') || 'trust';
+        document.documentElement.dataset.theme = t;
+      }catch(e){}
+    })();
+  </script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <div class="container">
-    <h1>DBS Check</h1>
+    <div class="topBar">
+  <h1>DBS Check</h1>
+  <div class="themeToggle" id="themeToggle">
+    <span class="muted">Theme</span>
+    <button type="button" id="themeTrust" class="chip chipActive">Trust</button>
+    <button type="button" id="themeModern" class="chip">Modern</button>
+  </div>
+</div>
     <p class="muted">Upload DBS PDF/image → Extract → (edit if needed) → Run DBS Check → PDF downloads.</p>
 
     <section class="card">
@@ -40,7 +55,7 @@
         </label>
         <label class="radio segment">
           <input type="radio" name="mode" id="modeBulk" value="bulk" />
-          Multiple check (up to 20)
+          Multiple check (up to 100)
         </label>
       </div>
 
@@ -78,8 +93,8 @@
           </label>
 </div>
 
-        <div class="row">
-          <button id="btnRun" class="primary">Run DBS Check (Download PDF)</button>
+        <div class="row actionBar actionBarBottom">
+          <button id="btnRun" class="primary">Run DBS Check</button>
           <span id="runStatus" class="muted"></span>
         </div>
         <div class="row">
@@ -99,7 +114,7 @@
         <input id="files" type="file" accept="application/pdf,image/*,.webp,.csv,.xlsx,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" multiple class="hiddenFile" />
         <div class="row btnRow"><button id="btnAddMore" type="button">Add more files</button>
           <button id="btnClearAll" type="button" class="danger">Clear all</button></div>
-        <div class="row">
+        <div class="row actionBar actionBarTop">
           <button id="btnExtractBulk">Extract all</button>
           <button id="btnDlExtractXlsx" type="button" class="ghost">Download Extract Excel (Optional)</button>
           <button id="btnDlExtractCsv" type="button" class="ghost">Download Extract CSV (Optional)</button>
@@ -111,45 +126,35 @@
         <div class="divider"></div>
 
         <h3>Extracted list (editable)</h3>
+
+<div id="bulkHeader" class="bulkHeader" aria-hidden="true">
+  <div class="bulkHeaderLeft">
+    <span>Remove</span>
+    <span>#</span>
+  </div>
+  <div class="bulkHeaderMain">
+    <span>Source</span>
+    <span>Certificate No</span>
+    <span>Surname</span>
+    <span>DOB (DD/MM/YYYY)</span>
+  </div>
+  <div class="bulkHeaderRight">
+    <span>Status</span>
+    <span>Output</span>
+  </div>
+</div>
+
 <div id="bulkList" class="bulkList"></div>
 
-        <div class="row">
+        <div class="row actionBar actionBarBottom">
           <button id="btnRunBulk" class="primary">Run All Checks</button>
-          <a id="btnDlZip" class="btnLink hidden" href="#" download>Download All PDFs (ZIP)</a>
+          <a id="btnDlZip" class="btnLink zipBtn hidden" href="#" download>Download All PDFs (ZIP)</a>
           <button id="btnDlResultsXlsx" type="button" class="ghost">Download Results Excel (Optional)</button>
           <button id="btnDlResultsCsv" type="button" class="ghost">Download Results CSV (Optional)</button>
           <span id="runBulkStatus" class="muted"></span>
+        <div id="zipNotice" class="muted"></div>
         </div>
-        <h3>Downloads</h3>
-          <div class="row">
-            <a id="zipLink" class="btnLink hidden" href="#" download>Download ZIP</a>
-          </div>
-          <div id="zipNotice" class="muted"></div>
-          <div class="tableWrap">
-            <table id="resultsTable">
-              <thead>
-              <tr>
-                <th>Remove</th>
-                <th>#</th>
-                <th>Source</th>
-                <th>Certificate No</th>
-                <th>Surname</th>
-                <th>DOB (DD/MM/YYYY)</th>
-                <th>Confidence</th>
-                <th>Status</th>
-                <th>Download</th>
-              </tr>
-            </thead>
-              <tbody id="resultsTbody"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <p class="hint">
-          Bulk output filenames: <b>{Surname} - DBS Check - {CheckedDate}.pdf</b>
-        </p>
-      </div>
-    </section>
+        </section>
   </div>
 
   <script src="/static/app.js"></script>

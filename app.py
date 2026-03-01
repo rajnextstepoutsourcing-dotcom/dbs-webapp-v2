@@ -1286,7 +1286,7 @@ async def _process_bulk_job(
     if not meta:
         return
 
-    if pdf_names:
+    if len(pdf_names) >= 2:
         zip_name = _safe_filename(f"DBS_Checks_{checked_date}.zip", "DBS_Checks.zip")
         zip_path = job_dir / zip_name
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -1297,6 +1297,10 @@ async def _process_bulk_job(
 
         meta["zip_name"] = zip_name
         meta["zip_ready"] = True
+        meta["message"] = ""
+    elif len(pdf_names) == 1:
+        meta["zip_name"] = ""
+        meta["zip_ready"] = False
         meta["message"] = ""
     else:
         # Professional: do not offer an empty ZIP
@@ -1474,4 +1478,3 @@ async def dbs_run(request: Request):
         "filename": final_name,
         "pdf_url": f"/dbs/download/{job_id}/{final_name}",
     })
-

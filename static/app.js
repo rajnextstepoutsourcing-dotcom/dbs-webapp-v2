@@ -21,12 +21,36 @@ let lastExtractedItems = [];
 
 function updateBulkCount() {
   setText("bulkCount", `${bulkFiles.length}/100 files selected`);
-  // Optional: update rows-ready counter if present
-  const rowEl = document.getElementById("bulkRowsCount");
+  // Update rows-ready counter if present
+  const rowEl = document.getElementById("bulkRowCount");
   if (rowEl) {
     const rows = document.querySelectorAll("#bulkList .bulkRow").length;
     rowEl.textContent = `${rows}/100 rows ready`;
   }
+}
+
+function applySavedTheme(){
+  try{
+    const saved = localStorage.getItem("dbs_theme") || "trust";
+    document.documentElement.dataset.theme = saved;
+  }catch(e){}
+}
+
+function initThemeToggle(){
+  try{
+    const btnTrust = $("themeTrust");
+    const btnModern = $("themeModern");
+    const apply = (t)=>{
+      document.documentElement.dataset.theme = t;
+      localStorage.setItem("dbs_theme", t);
+      if (btnTrust) btnTrust.classList.toggle("chipActive", t==="trust");
+      if (btnModern) btnModern.classList.toggle("chipActive", t==="modern");
+    };
+    if (btnTrust) btnTrust.addEventListener("click", ()=>apply("trust"));
+    if (btnModern) btnModern.addEventListener("click", ()=>apply("modern"));
+    applySavedTheme();
+    apply(document.documentElement.dataset.theme || "trust");
+  }catch(e){}
 }
 
 
@@ -71,10 +95,10 @@ function statusLabel(status) {
   if (!status) return "";
   if (status === "queued") return "Queued";
   if (status === "running") return "Running…";
-  if (status === "clear") return "✅ Clear";
-  if (status === "not_on_update_service") return "⚠ Not on Update Service";
-  if (status === "needs_review") return "❌ Needs Review";
-  if (status === "portal_unavailable") return "⛔ Portal Unavailable";
+  if (status === "clear") return "Clear";
+  if (status === "not_on_update_service") return "Not on Update Service";
+  if (status === "needs_review") return "Needs Review";
+  if (status === "portal_unavailable") return "Portal unavailable";
   return status;
 }
 
@@ -89,15 +113,28 @@ function buildBadge(status) {
   return span;
 }
 
+function confClass(pct){
+  const p = Number(pct||0);
+  if (p >= 90) return "confHigh";
+  if (p >= 75) return "confMed";
+  return "confLow";
+}
+
+function confHint(pct){
+  const p = Math.max(0, Math.min(100, Math.round(Number(pct||0))));
+  return `<span class="confDot ${confClass(p)}" aria-hidden="true"></span>${p}%`;
+}
+
 function ensureModeUI() {
   const mode = $("modeBulk").checked ? "bulk" : "single";
   $("singleWrap").classList.toggle("hidden", mode !== "single");
   $("bulkWrap").classList.toggle("hidden", mode !== "bulk");
 }
 
-$("modeSingle")?.addEventListener("change", ensureModeUI);
-$("modeBulk")?.addEventListener("change", ensureModeUI);
-ensureModeUI();
+function bindModeHandlers(){
+  $("modeSingle")?.addEventListener("change", ensureModeUI);
+  $("modeBulk")?.addEventListener("change", ensureModeUI);
+}
 
 // -------------------------
 // Bulk file handling (append + drag/drop, max 100)
@@ -119,7 +156,7 @@ function renderChips(){
   wrap.innerHTML="";
   bulkFiles.forEach((f, idx)=>{
     const chip=document.createElement("span");
-    chip.className="chip";
+    chip.className="chipFile";
     chip.innerHTML=`<span title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>`;
     const btn=document.createElement("button");
     btn.type="button";
@@ -156,12 +193,10 @@ $("btnClearAll")?.addEventListener("click", () => {
   updateBulkCount();
   const list = $("bulkList");
   if (list) list.innerHTML = "";
-  const rtb = $("resultsTbody");
-  if (rtb) rtb.innerHTML = "";
   setText("extractBulkStatus", "");
   setText("runBulkStatus", "");
   setText("zipNotice", "");
-  const zip = $("zipLink");
+  const zip = $("btnDlZip");
   if (zip) zip.classList.add("hidden");
 });
 
@@ -297,7 +332,7 @@ function renderBulkTable(items) {
     row.innerHTML = `
       <div class="bulkRowTop">
         <div class="bulkRowLeft">
-          <button type="button" class="btnTiny danger btnRemoveRow" data-idx="${idx}">Remove</button>
+          <button type="button" class="iconBtn btnRemoveRow" data-idx="${idx}" aria-label="Remove row" title="Remove">×</button>
           <div class="bulkIndex">#${idx + 1}</div>
         </div>
 
@@ -310,13 +345,13 @@ function renderBulkTable(items) {
           <div class="fieldBlock">
             <div class="fieldLabel">Certificate No</div>
             <input class="cell cert" value="${it.certificate_number || ""}">
-            <div class="fieldHint">Confidence: ${Math.round(conf.certificate_number || 0)}%</div>
+            <div class="fieldHint">${confHint(conf.certificate_number || 0)}</div>
           </div>
 
           <div class="fieldBlock">
             <div class="fieldLabel">Surname</div>
             <input class="cell surname" value="${it.surname || ""}">
-            <div class="fieldHint">Confidence: ${Math.round(conf.surname || 0)}%</div>
+            <div class="fieldHint">${confHint(conf.surname || 0)}</div>
           </div>
 
           <div class="fieldBlock">
@@ -326,18 +361,18 @@ function renderBulkTable(items) {
               <input class="cell mm" value="${it.dob_month || ""}" placeholder="MM">
               <input class="cell yy" value="${it.dob_year || ""}" placeholder="YYYY">
             </div>
-            <div class="fieldHint">Confidence: ${Math.round(conf.dob || 0)}%</div>
+            <div class="fieldHint">${confHint(conf.dob || 0)}</div>
           </div>
         </div>
 
         <div class="bulkActions">
           <div class="statusWrap"><span class="statusCell"></span></div>
-          <div class="dlWrap"><span class="dlCell muted">—</span></div>
+          <div class="dlWrap"><span class="dlCell muted">Not run yet</span></div>
         </div>
       </div>
 
       <div class="bulkMeta">
-        <div class="confLine">Overall confidence: ${Math.round(overall || 0)}%</div>
+        <div class="confLine">Overall confidence: <span class="confDot ${confClass(overall||0)}" aria-hidden="true"></span>${Math.round(overall || 0)}%</div>
       </div>
     `;
     list.appendChild(row);
@@ -502,23 +537,18 @@ function updateBulkUIFromStatus(data) {
     }
 
     if (r.status === "portal_unavailable") {
-      dlCell.innerHTML = `<span class="muted">No output (portal unavailable)</span>`;
-      // Show user-friendly message under status
-      const msg = document.createElement("div");
-      msg.className = "submsg";
-      msg.textContent = "DBS portal unavailable (maintenance). Try later.";
-      statusCell.appendChild(msg);
+      dlCell.innerHTML = `<span class="muted">DBS portal unavailable (maintenance). Try later.</span>`;
       return;
     }
 
     if (r.pdf_url) {
-      dlCell.innerHTML = `<a class="btnSmall" href="${r.pdf_url}">Download</a>`;
+      dlCell.innerHTML = `<a class="btnSmall downloadBtn" href="${r.pdf_url}">⬇ Download PDF</a>`;
     } else {
       dlCell.innerHTML = `<span class="muted">No output</span>`;
     }
   });
 
-  const zipBtn = $("btnDlZip") || $("zipLink");
+  const zipBtn = $("btnDlZip") || $("btnDlZip");
   if ($("zipNotice")) setText("zipNotice", data.message || "");
   if (zipBtn) {
     if (data.zip_ready && data.zip_url) {
@@ -573,4 +603,13 @@ $("btnRunBulk")?.addEventListener("click", async () => {
     setText("runBulkStatus", err?.message || "Bulk run failed.");
     setDisabled("btnRunBulk", false);
   }
+});
+
+
+document.addEventListener("DOMContentLoaded", () => {
+  applySavedTheme();
+  initThemeToggle();
+  bindModeHandlers();
+  ensureModeUI();
+  updateBulkCount();
 });
