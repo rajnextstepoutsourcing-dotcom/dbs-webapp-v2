@@ -511,10 +511,6 @@ async function exportResults(fmt){
   const blob = await resp.blob();
   downloadBlob(blob, fmt==="csv" ? "results.csv" : "results.xlsx");
 }
-
-
-  try{ await exportExtract("csv"); } catch(e){ setText("extractBulkStatus", e?.message || "Export failed."); }
-});
 $("btnDlResultsXlsx")?.addEventListener("click", async ()=>{
   try{ await exportResults("xlsx"); } catch(e){ setText("runBulkStatus", e?.message || "Export failed."); }
 });
