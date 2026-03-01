@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DBS Check</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>DBS Check</h1>
+    <p class="muted">Upload DBS PDF/image → Extract → (edit if needed) → Run DBS Check → PDF downloads.</p>
+
+    <section class="card">
+      <h2>Step 1 — Enter details</h2>
+      <div class="grid">
+        <label>
+          Organisation Name
+          <input id="org" type="text" placeholder="e.g., MSL Healthcare" />
+        </label>
+        <label>
+          Forename
+          <input id="forename" type="text" placeholder="e.g., Dhaval" />
+        </label>
+        <label>
+          Surname
+          <input id="surname_user" type="text" placeholder="e.g., Acharya" />
+        </label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Step 2 — Upload DBS document</h2>
+
+      <div class="modeRow">
+        <span class="muted">Mode:</span>
+        <label class="radio">
+          <input type="radio" name="mode" id="modeSingle" value="single" checked />
+          Single check
+        </label>
+        <label class="radio">
+          <input type="radio" name="mode" id="modeBulk" value="bulk" />
+          Multiple check (up to 20)
+        </label>
+      </div>
+
+      <!-- Single -->
+      <div id="singleWrap">
+        <input id="file" type="file" accept="application/pdf,image/*" />
+        <div class="row">
+          <button id="btnExtract">Extract</button>
+          <span id="extractStatus" class="muted"></span>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3>Extracted (editable)</h3>
+        <div class="grid">
+          <label>
+            Certificate Number
+            <input id="certificate_number" type="text" />
+            <small id="conf_cert" class="muted"></small>
+          </label>
+          <label>
+            Surname (from DBS)
+            <input id="surname_extracted" type="text" />
+            <small id="conf_surname" class="muted"></small>
+          </label>
+          <label>
+            DOB (DD / MM / YYYY)
+            <div class="grid3">
+              <input id="dob_day" type="text" placeholder="DD" />
+              <input id="dob_month" type="text" placeholder="MM" />
+              <input id="dob_year" type="text" placeholder="YYYY" />
+            </div>
+            <small id="conf_dob" class="muted"></small>
+          </label>
+          <label>
+            Issue Date (DD / MM / YYYY)
+            <div class="grid3">
+              <input id="issue_day" type="text" placeholder="DD" />
+              <input id="issue_month" type="text" placeholder="MM" />
+              <input id="issue_year" type="text" placeholder="YYYY" />
+            </div>
+            <small id="conf_issue" class="muted"></small>
+          </label>
+        </div>
+
+        <div class="row">
+          <button id="btnRun" class="primary">Run DBS Check (Download PDF)</button>
+          <span id="runStatus" class="muted"></span>
+        </div>
+
+        <p class="hint">
+          Output filename: <b>{Surname} - DBS Check - {CheckedDate}.pdf</b>
+        </p>
+      </div>
+
+      <!-- Bulk -->
+      <div id="bulkWrap" class="hidden">
+        <input id="files" type="file" accept="application/pdf,image/*" multiple />
+        <div class="row">
+          <button id="btnExtractBulk">Extract all</button>
+          <span id="bulkCount" class="muted"></span>
+          <span id="extractBulkStatus" class="muted"></span>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3>Extracted list (editable)</h3>
+
+        <div class="row">
+          <label class="muted">Downloads after run:</label>
+          <select id="bulkDownloadMode">
+            <option value="zip" selected>ZIP (recommended)</option>
+            <option value="individual">Individual PDFs (manual download)</option>
+          </select>
+        </div>
+
+        <div class="tableWrap">
+          <table id="bulkTable">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Certificate No</th>
+                <th>Surname</th>
+                <th>DOB (DD/MM/YYYY)</th>
+                <th>Issue Date</th>
+                <th>Verification</th>
+              </tr>
+            </thead>
+            <tbody id="bulkTbody"></tbody>
+          </table>
+        </div>
+
+        <div class="row">
+          <button id="btnRunBulk" class="primary">Run All Checks</button>
+          <span id="runBulkStatus" class="muted"></span>
+        </div>
+
+        <div id="bulkResults" class="hidden">
+          <div class="divider"></div>
+          <h3>Downloads</h3>
+          <div class="row">
+            <a id="zipLink" class="btnLink hidden" href="#" download>Download ZIP</a>
+          </div>
+          <div class="tableWrap">
+            <table id="resultsTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Status</th>
+                  <th>Filename</th>
+                  <th>Download</th>
+                </tr>
+              </thead>
+              <tbody id="resultsTbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <p class="hint">
+          Bulk output filenames: <b>{Surname} - DBS Check - {CheckedDate}.pdf</b>
+        </p>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
